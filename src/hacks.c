@@ -189,7 +189,7 @@ static void apply_daibanchou_hacks(struct ain *ain)
 
 void apply_game_specific_hacks(struct ain *ain)
 {
-	char *game_name = sjis2utf(config.game_name, 0);
+	char *game_name = vm_str_to_utf8(config.game_name, 0);
 	if (!strcmp(game_name, "大番長")) {
 		apply_daibanchou_hacks(ain);
 	} else if (!strcmp(game_name, "Rance 02")) {

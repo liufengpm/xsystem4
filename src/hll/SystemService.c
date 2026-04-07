@@ -269,9 +269,9 @@ static bool SystemService_GetMouseCursorConfig(int type, int *value)
 
 void SystemService_GetGameFolderPath(struct string **folder_path)
 {
-	char *sjis = utf2sjis(config.game_dir, 0);
-	*folder_path = make_string(sjis, strlen(sjis));
-	free(sjis);
+	char *utf = utf8_to_vm_str(config.game_dir);
+	*folder_path = make_string(utf, strlen(utf));
+	free(utf);
 }
 
 static void SystemService_GetTime(int *hour, int *min, int *sec)

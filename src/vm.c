@@ -534,7 +534,7 @@ static void system_call(enum syscall_code code)
 	}
 	case SYS_MSGBOX: {
 		struct string *str = stack_peek_string(0);
-		char *utf = sjis2utf(str->text, str->size);
+		char *utf = vm_str_to_utf8(str->text, str->size);
 		SDL_ShowSimpleMessageBox(0, "xsystem4", utf, NULL);
 		free(utf);
 		// XXX: caller S_POPs
@@ -543,7 +543,7 @@ static void system_call(enum syscall_code code)
 	case SYS_MSGBOX_OK_CANCEL: {
 		int result = 0;
 		struct string *str = stack_peek_string(0);
-		char *utf = sjis2utf(str->text, str->size);
+		char *utf = vm_str_to_utf8(str->text, str->size);
 
 		const SDL_MessageBoxData mbox = {
 			SDL_MESSAGEBOX_INFORMATION,

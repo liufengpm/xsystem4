@@ -1,2 +1,6 @@
 option('debugger', type : 'feature', value : 'auto')
 option('opengles', type : 'feature', value : 'auto', description : 'Target OpenGL ES 3.0')
+option('windows_static_deps',
+	type : 'boolean',
+	value : false,
+	description : 'Prefer static third-party dependency resolution on Windows')

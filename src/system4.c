@@ -25,6 +25,14 @@
 #include <math.h>
 #include <limits.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#define NOGDI
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 #include "system4.h"
 #include "system4/ain.h"
 #include "system4/file.h"
@@ -72,6 +80,211 @@ struct config config = {
 	.fnl_path = NULL,
 	.font_paths = { NULL, NULL },
 };
+
+static bool is_ascii_text(const char *text)
+{
+	for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+		if (*p & 0x80)
+			return false;
+	}
+	return true;
+}
+
+#ifdef _WIN32
+static wchar_t *decode_multibyte_string(const char *text, UINT codepage)
+{
+	DWORD flags = codepage == CP_UTF8 ? MB_ERR_INVALID_CHARS : 0;
+	int nr_wchars = MultiByteToWideChar(codepage, flags, text, -1, NULL, 0);
+	if (nr_wchars <= 0)
+		return NULL;
+
+	wchar_t *wide = xmalloc(nr_wchars * sizeof(wchar_t));
+	if (!MultiByteToWideChar(codepage, flags, text, -1, wide, nr_wchars)) {
+		free(wide);
+		return NULL;
+	}
+	return wide;
+}
+
+static char *encode_wide_string(const wchar_t *text, UINT codepage)
+{
+	BOOL used_default_char = FALSE;
+	int nr_chars = WideCharToMultiByte(codepage, WC_NO_BEST_FIT_CHARS, text, -1,
+			NULL, 0, NULL, &used_default_char);
+	if (nr_chars <= 0)
+		return NULL;
+
+	char *encoded = xmalloc(nr_chars);
+	if (!WideCharToMultiByte(codepage, WC_NO_BEST_FIT_CHARS, text, -1,
+			encoded, nr_chars, NULL, &used_default_char)) {
+		free(encoded);
+		return NULL;
+	}
+	return encoded;
+}
+
+static char *decode_multibyte_to_utf8(const char *text, UINT codepage)
+{
+	wchar_t *wide = decode_multibyte_string(text, codepage);
+	if (!wide)
+		return NULL;
+	char *utf8 = wchar_to_utf8(wide);
+	free(wide);
+	return utf8;
+}
+
+/* Detected game text codepage: 932 (SJIS, default) or 20932 (EUC-JP). */
+static UINT game_str_codepage = 932;
+
+/* Conversion function passed to ain_open_conv(): converts game-native encoding -> UTF-8. */
+static char *game_text_to_utf8(const char *str)
+{
+	if (!str)
+		return NULL;
+	if (is_ascii_text(str))
+		return strdup(str);
+	return decode_multibyte_to_utf8(str, game_str_codepage);
+}
+
+static int score_decoded_string(const wchar_t *text)
+{
+	int score = 0;
+
+	for (; *text; text++) {
+		wchar_t c = *text;
+		if (c < 0x20 && c != '\t' && c != '\r' && c != '\n') {
+			score -= 20;
+		} else if (c >= 0xE000 && c <= 0xF8FF) {
+			score -= 20;
+		} else if ((c >= 0x3040 && c <= 0x30FF)
+				|| (c >= 0x3400 && c <= 0x4DBF)
+				|| (c >= 0x4E00 && c <= 0x9FFF)
+				|| (c >= 0xFF10 && c <= 0xFF19)
+				|| (c >= 0xFF21 && c <= 0xFF3A)
+				|| (c >= 0xFF41 && c <= 0xFF5A)) {
+			score += 4;
+		} else if ((c >= 0x20 && c <= 0x7E) || c == 0x3000) {
+			score += 2;
+		} else if (c == 0x30FB || c == 0xFF65) {
+			score -= 2;
+		} else if (c >= 0xFF61 && c <= 0xFF9F) {
+			score -= 1;
+		}
+	}
+
+	return score;
+}
+
+static char *normalize_ini_game_text(const char *text)
+{
+	if (!text)
+		return NULL;
+	if (is_ascii_text(text))
+		return strdup(text);
+
+	/* Try UTF-8, then system ANSI (GBK on Chinese Windows, CP_ACP),
+	 * then EUC-JP (cp20932), then cp51932, then SJIS/cp932. */
+	static const UINT codepages[] = { CP_UTF8, CP_ACP, 20932, 51932, 932 };
+	wchar_t *best = NULL;
+	int best_score = INT_MIN;
+
+	for (size_t i = 0; i < sizeof(codepages) / sizeof(codepages[0]); i++) {
+		wchar_t *candidate = decode_multibyte_string(text, codepages[i]);
+		if (!candidate)
+			continue;
+
+		int score = score_decoded_string(candidate);
+		if (!best || score > best_score) {
+			free(best);
+			best = candidate;
+			best_score = score;
+		} else {
+			free(candidate);
+		}
+	}
+
+	if (!best)
+		return strdup(text);
+
+	char *utf8 = wchar_to_utf8(best);
+	free(best);
+	if (!utf8)
+		return strdup(text);
+	return utf8;
+}
+
+static char *utf8_to_game_text(const char *text)
+{
+	/* On Windows all config strings are UTF-8; return a plain copy. */
+	return text ? strdup(text) : NULL;
+}
+
+static char *resolve_ini_ain_filename(const char *game_dir, const char *raw_name)
+{
+	if (!raw_name)
+		return NULL;
+
+	/*
+	 * The CodeName value in alicestart.ini may be encoded in EUC-JP (cp20932)
+	 * rather than the expected SJIS, particularly in older Alice Soft titles.
+	 * Try UTF-8, EUC-JP (cp20932), SJIS in order; pick the first whose decoded
+	 * name exists on the filesystem.  cp51932 is intentionally omitted because
+	 * it is not reliably available on all Windows installations.
+	 */
+	static const UINT codepages[] = { CP_UTF8, 20932, 932 };
+	for (size_t i = 0; i < sizeof(codepages) / sizeof(codepages[0]); i++) {
+		char *utf8_name = decode_multibyte_to_utf8(raw_name, codepages[i]);
+		if (!utf8_name)
+			continue;
+
+		char *candidate = path_join(game_dir, utf8_name);
+		bool exists = file_exists(candidate);
+		free(candidate);
+		if (exists) {
+			/* Record the detected encoding for ain_open_conv(). */
+			game_str_codepage = codepages[i];
+			char *resolved = utf8_to_game_text(utf8_name);
+			free(utf8_name);
+			return resolved;
+		}
+		free(utf8_name);
+	}
+
+	return normalize_ini_game_text(raw_name);
+}
+
+static char **normalize_argv_utf8(int *argc)
+{
+	int wargc = 0;
+	LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+	if (!wargv)
+		return NULL;
+
+	char **utf8_argv = xcalloc(wargc + 1, sizeof(char *));
+	for (int i = 0; i < wargc; i++) {
+		utf8_argv[i] = wchar_to_utf8(wargv[i]);
+	}
+	LocalFree(wargv);
+	*argc = wargc;
+	return utf8_argv;
+}
+#else
+static char *normalize_ini_game_text(const char *text)
+{
+	return text ? strdup(text) : NULL;
+}
+
+static char *utf8_to_game_text(const char *text)
+{
+	return text ? utf2sjis(text, strlen(text)) : NULL;
+}
+
+static char *resolve_ini_ain_filename(const char *game_dir, const char *raw_name)
+{
+	(void)game_dir;
+	return normalize_ini_game_text(raw_name);
+}
+#endif
 
 static struct string *ini_string(struct ini_entry *entry)
 {
@@ -132,15 +345,15 @@ static bool read_config(const char *path)
 
 	for (int i = 0; i < ini_size; i++) {
 		if (!strcmp(ini[i].name->text, "GameName")) {
-			config.game_name = strdup(ini_string(&ini[i])->text);
+			config.game_name = normalize_ini_game_text(ini_string(&ini[i])->text);
 		} else if (!strcmp(ini[i].name->text, "BootName")) {
-			config.boot_name = strdup(ini_string(&ini[i])->text);
+			config.boot_name = normalize_ini_game_text(ini_string(&ini[i])->text);
 		} else if (!strcmp(ini[i].name->text, "CodeName")) {
 			config.ain_filename = strdup(ini_string(&ini[i])->text);
 		} else if (!strcmp(ini[i].name->text, "MainVM")) {
-			config.vm_name = strdup(ini_string(&ini[i])->text);
+			config.vm_name = normalize_ini_game_text(ini_string(&ini[i])->text);
 		} else if (!strcmp(ini[i].name->text, "SaveFolder")) {
-			config.save_dir = strdup(ini_string(&ini[i])->text);
+			config.save_dir = normalize_ini_game_text(ini_string(&ini[i])->text);
 		} else if (!strcmp(ini[i].name->text, "ViewWidth")) {
 			config.view_width = ini_integer(&ini[i]);
 		} else if (!strcmp(ini[i].name->text, "ViewHeight")) {
@@ -248,6 +461,18 @@ static char *get_xsystem4_home(void)
 		return home;
 	}
 
+#ifdef _WIN32
+	// %APPDATA%/xsystem4  (e.g. C:/Users/user/AppData/Roaming/xsystem4)
+	env_home = getenv("APPDATA");
+	if (!env_home || !*env_home)
+		env_home = getenv("USERPROFILE");
+	if (env_home && *env_home) {
+		char buf[PATH_MAX];
+		snprintf(buf, PATH_MAX - 1, "%s/xsystem4", env_home);
+		return realpath_utf8(buf);
+	}
+#endif
+
 	// If all else fails, use the current directory
 	return realpath_utf8(".");
 }
@@ -257,8 +482,17 @@ static char *get_save_path(const char *dir_name)
 	if (!dir_name)
 		dir_name = "SaveData";
 
+#ifdef _WIN32
+	/* On Windows, save directly inside the game directory to avoid
+	 * issues with non-ASCII characters in the home path. */
+	char *save_dir = xmalloc(strlen(config.game_dir) + 1 + strlen(dir_name) + 1);
+	strcpy(save_dir, config.game_dir);
+	strcat(save_dir, "/");
+	strcat(save_dir, dir_name);
+	return save_dir;
+#else
 	char *utf8_game_name = sjis2utf(config.game_name, strlen(config.game_name));
-	char *utf8_dir_name = sjis2utf(dir_name, strlen(dir_name));
+	char *utf8_dir_name  = sjis2utf(dir_name, strlen(dir_name));
 	char *save_dir = xmalloc(strlen(config.home_dir) + 1 + strlen(utf8_game_name) + 1 + strlen(utf8_dir_name) + 1);
 	strcpy(save_dir, config.home_dir);
 	strcat(save_dir, "/");
@@ -268,6 +502,7 @@ static char *get_save_path(const char *dir_name)
 	free(utf8_game_name);
 	free(utf8_dir_name);
 	return save_dir;
+#endif
 }
 
 static void config_init(void)
@@ -290,6 +525,9 @@ static bool config_init_with_ini(const char *ini_path)
 	char *tmp = strdup(ini_path);
 	config.game_dir = strdup(path_dirname(tmp));
 	free(tmp);
+	char *resolved_ain_filename = resolve_ini_ain_filename(config.game_dir, config.ain_filename);
+	free(config.ain_filename);
+	config.ain_filename = resolved_ain_filename;
 	config_init();
 	return true;
 }
@@ -308,7 +546,7 @@ static bool config_init_with_dir(const char *dir)
 
 static void config_init_with_ain(const char *ain_path)
 {
-	config.ain_filename = strdup(path_basename(ain_path));
+	config.ain_filename = utf8_to_game_text(path_basename(ain_path));
 	config.game_dir = strdup(path_dirname(ain_path));
 	config_init();
 }
@@ -418,6 +656,12 @@ static void error_handler(const char *msg)
 int main(int argc, char *argv[])
 {
 	sys_error_handler = error_handler;
+
+#ifdef _WIN32
+	char **utf8_argv = normalize_argv_utf8(&argc);
+	if (utf8_argv)
+		argv = utf8_argv;
+#endif
 
 	char *ainfile;
 	int err = AIN_SUCCESS;
@@ -578,8 +822,12 @@ int main(int argc, char *argv[])
 		config.save_dir = strdup(savedir);
 	}
 
+#ifdef _WIN32
+	if (!(ain = ain_open_conv(ainfile, game_text_to_utf8, &err))) {
+#else
 	if (!(ain = ain_open(ainfile, &err))) {
-		ERROR("%s", ain_strerror(err));
+#endif
+		ERROR("%s: %s", ain_strerror(err), display_utf0(ainfile));
 	}
 
 	if (audit) {

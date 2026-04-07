@@ -435,7 +435,7 @@ static void Gpx2Plus_SetFontSize(int size)
 
 static void Gpx2Plus_SetFontName(struct string *name)
 {
-	char *u = sjis2utf(name->text, name->size);
+	char *u = vm_str_to_utf8(name->text, name->size);
 	if (!strcmp(u, "ＭＳ ゴシック"))
 		gfx_set_font_face(FONT_GOTHIC);
 	else if (!strcmp(u, "ＭＳ 明朝"))

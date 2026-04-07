@@ -109,7 +109,13 @@ const char *display_utf2(const char *utf)
 
 char *unix_path(const char *path)
 {
+#ifdef _WIN32
+	/* On Windows, AIN strings are loaded as UTF-8 via ain_open_conv().
+	 * No encoding conversion is needed here; just normalise separators. */
+	char *utf = strdup(path);
+#else
 	char *utf = sjis2utf(path, strlen(path));
+#endif
 	for (int i = 0; utf[i]; i++) {
 		if (utf[i] == '\\')
 			utf[i] = '/';

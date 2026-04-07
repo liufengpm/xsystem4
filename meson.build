@@ -9,7 +9,7 @@ if get_option('buildtype').startswith('release')
 endif
 
 static_libs = false
-if host_machine.system() == 'windows'
+if host_machine.system() == 'windows' and get_option('windows_static_deps')
     static_libs = true
 endif
 
@@ -47,7 +47,14 @@ bison = find_program('bison')
 
 incdir = include_directories('include')
 
-libsys4_proj = subproject('libsys4')
+libsys4_default_options = []
+if get_option('windows_static_deps')
+    libsys4_default_options += ['windows_static_deps=true']
+else
+    libsys4_default_options += ['windows_static_deps=false']
+endif
+
+libsys4_proj = subproject('libsys4', default_options : libsys4_default_options)
 libsys4_dep = libsys4_proj.get_variable('libsys4_dep')
 
 subdir('src')

@@ -179,7 +179,7 @@ static int gl_initialize(void)
 static void set_window_title(void)
 {
 	char title[1024] = { [1023] = 0 };
-	char *game_name = sjis2utf(config.game_name, 0);
+	char *game_name = vm_str_to_utf8(config.game_name, 0);
 	snprintf(title, 1023, "%s - XSystem4", game_name);
 	free(game_name);
 

@@ -81,7 +81,7 @@ static void InputString_End(void)
 
 static void handle_input(const char *text)
 {
-	char *u = utf2sjis(text, 0);
+	char *u = utf8_to_vm_str(text);
 	string_append_cstr(&result, u, strlen(u));
 	free(u);
 	has_editing_text = false;

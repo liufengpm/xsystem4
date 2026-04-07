@@ -211,7 +211,7 @@ if get_option('debugger').allowed()
 endif
 
 static_link_args = []
-if host_machine.system() == 'windows'
+if host_machine.system() == 'windows' and get_option('windows_static_deps')
     static_link_args = ['-static', '-lstdc++']
 endif
 
