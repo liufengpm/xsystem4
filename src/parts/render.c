@@ -524,6 +524,8 @@ void parts_dirty(possibly_unused struct parts *parts)
 
 void parts_render_init(void)
 {
+	if (parts_shader.shader.program)
+		return;  // already initialised (e.g. on session restart with preserved GL context)
 	gfx_load_shader(&parts_shader.shader, "shaders/parts.v.glsl", "shaders/parts.f.glsl");
 	parts_shader.blend_rate = glGetUniformLocation(parts_shader.shader.program, "blend_rate");
 	parts_shader.bot_left = glGetUniformLocation(parts_shader.shader.program, "bot_left");

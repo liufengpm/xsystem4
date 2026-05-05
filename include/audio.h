@@ -22,6 +22,7 @@
 struct archive_data;
 
 void audio_init(void);
+void audio_shutdown(void);
 void audio_reset(void);
 void audio_update(void);
 bool audio_play_sound(int sound_no);

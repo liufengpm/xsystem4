@@ -81,7 +81,7 @@ struct sound_motion {
 
 struct parts_text_char {
 	Texture t;
-	char ch[4];
+	char ch[5];
 	float advance;
 	Point off;
 };

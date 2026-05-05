@@ -22,9 +22,8 @@ uniform float progress;  // effect progress (0..1)
 in vec2 tex_coord;
 out vec4 frag_color;
 
-const float PI = 3.14159265;
+// [OHOS] PI and sigma inlined to avoid Maleoon 920 S0015 (const*const mul triggers spurious error).
 const vec2 tex_offset = vec2(1.0, 1.0);
-const float sigma = 50.0;
 
 vec3 get_pixel(vec2 xy) {
         return texture(old, xy).rgb;
@@ -37,8 +36,8 @@ void main() {
         float blur_half = blur_size / 2.0;
 
         vec3 gauss;
-        gauss.x = 1.0 / (sqrt(2.0 * PI) * sigma);
-        gauss.y = exp(-0.5 / (sigma * sigma));
+        gauss.x = 1.0 / (sqrt(6.28318530) * 50.0); // 1/(sqrt(2*PI)*sigma), PI=3.14159265, sigma=50
+        gauss.y = exp(-0.5 / 2500.0);               // exp(-0.5/sigma^2), sigma=50
         gauss.z = gauss.y * gauss.y;
 
         vec3 avg = vec3(0.0);

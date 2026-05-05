@@ -50,6 +50,14 @@ static size_t json_cursor = 0;
 static void read_page(struct page *page);
 static void write_page(struct page *page);
 
+static struct string *buffer_read_game_string(struct buffer *buf)
+{
+	size_t raw_len = strlen(buffer_strdata(buf));
+	struct string *s = xsystem4_cstring_to_string(buffer_strdata(buf), raw_len);
+	buffer_skip(buf, raw_len + 1);
+	return s;
+}
+
 static void read_value(union vm_value *v, enum ain_data_type type)
 {
 	switch (type) {
@@ -63,7 +71,7 @@ static void read_value(union vm_value *v, enum ain_data_type type)
 		break;
 	case AIN_STRING:
 		variable_fini(*v, type, true);
-		v->i = heap_alloc_string(buffer_read_string(&contents));
+		v->i = heap_alloc_string(buffer_read_game_string(&contents));
 		break;
 	case AIN_STRUCT:
 	case AIN_ARRAY_TYPE:

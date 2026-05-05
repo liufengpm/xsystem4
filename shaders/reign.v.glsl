@@ -14,7 +14,7 @@
  * along with this program; if not, see <http://gnu.org/licenses/>.
  */
 
-const float PI = 3.14159265358979323846;
+// [OHOS] PI inlined to avoid Maleoon 920 S0015 (const float used in mul expression).
 
 #if ENGINE == REIGN_ENGINE
 
@@ -149,8 +149,8 @@ void main() {
 		// definitions of Rayleigh / Mie phase functions in [1]), but this is
 		// how TT3's shader works.
 		// [1] http://amd-dev.wpengine.netdna-cdn.com/wordpress/media/2012/10/ATI-LightScattering.pdf
-		float phase_r = 3.0 / 16.0 * PI * (1.0 + cos_theta * cos_theta);
-		float phase_m = 1.0 / 4.0 * PI * (1.0 - g) * (1.0 - g) / pow(1.0 + g * g - 2.0 * g * cos_theta, 1.5);
+		float phase_r = 0.58904862 * (1.0 + cos_theta * cos_theta); // 3/16*PI
+		float phase_m = 0.78539816 * (1.0 - g) * (1.0 - g) / pow(1.0 + g * g - 2.0 * g * cos_theta, 1.5); // PI/4
 		float f_ex = exp((beta_r + beta_m) * -distance);
 		ls_in = (phase_r * beta_r + phase_m * beta_m) / (beta_r + beta_m) * (1.0 - f_ex) * ls_sun_color;
 		ls_ex = ls_light_color * f_ex;

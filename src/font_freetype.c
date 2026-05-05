@@ -134,6 +134,12 @@ static void ft_font_set_size(struct font_ft *font, unsigned size)
 	font->current_size = size;
 }
 
+static bool ft_font_has_glyph(struct font *_font, uint32_t code)
+{
+	struct font_ft *font = (struct font_ft*)_font;
+	return code == 0 || FT_Get_Char_Index(font->font, code) != 0;
+}
+
 static bool ft_font_get_glyph(struct font_size *size, struct glyph *glyph, uint32_t code, enum font_weight weight)
 {
 	Texture *t = &glyph->t[weight];
@@ -213,9 +219,9 @@ struct font *ft_font_load(const char *path)
 {
 	struct font_ft *font = xcalloc(1, sizeof(struct font_ft));
 
-#ifdef __ANDROID__
-	// On Android, path may be an asset name which FT_New_Face cannot read
-	// directly, so use SDL_LoadFile to load the content into memory.
+#if defined(__ANDROID__) || defined(__OHOS__)
+	/* Mobile/runtime-packaged builds may provide fonts as SDL-readable assets
+	 * rather than filesystem paths, so load the face from memory. */
 	size_t size;
 	void *buf = SDL_LoadFile(path, &size);
 	if (!buf) {
@@ -234,18 +240,20 @@ struct font *ft_font_load(const char *path)
 	}
 #endif
 
-	if (!font->font->charmap) {
+	if (FT_Select_Charmap(font->font, FT_ENCODING_UNICODE)) {
 		WARNING("Font '%s' doesn't contain unicode charmap", path);
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__OHOS__)
 		free(buf);
 #endif
 		free(font);
 		return NULL;
 	}
 
+	font->super.charmap = CHARMAP_UNICODE;
 	font->super.get_size = ft_font_get_size;
 	font->super.get_actual_size = ft_font_get_actual_size;
 	font->super.get_actual_size_round_down = ft_font_get_actual_size;
+	font->super.has_glyph = ft_font_has_glyph;
 	font->super.get_glyph = ft_font_get_glyph;
 	font->super.size_char = ft_font_size_char;
 	font->super.size_char_kerning = ft_font_size_char_kerning;

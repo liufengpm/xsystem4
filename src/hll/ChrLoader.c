@@ -124,7 +124,7 @@ struct string *chr_loader_get_name(int id)
 
 	uint32_t offset = LittleEndian_getDW(data, 8);
 	offset += is_enemy(data) ? 88 : 120;
-	return cstr_to_string((char *)data + offset);
+	return xsystem4_cstring_to_string((char *)data + offset, strlen((char *)data + offset));
 }
 
 struct string *chr_loader_get_string(int id, int index)
@@ -136,7 +136,7 @@ struct string *chr_loader_get_string(int id, int index)
 	uint32_t offset = LittleEndian_getDW(data, 52 + index * 4);
 	if (!offset)
 		return NULL;
-	return cstr_to_string((char *)data + offset);
+	return xsystem4_cstring_to_string((char *)data + offset, strlen((char *)data + offset));
 }
 
 int chr_loader_get_id(int id)

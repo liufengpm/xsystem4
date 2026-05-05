@@ -192,15 +192,43 @@ static union vm_value *stack_peek_ptr(int n)
 	return &stack[stack_ptr - (1 + n)];
 }
 
+static void log_invalid_var_ref(int32_t heap_index, int32_t page_index)
+{
+	const char *func_name = "<no-frame>";
+	if (call_stack_ptr > 0) {
+		struct page *page = local_page();
+		if (page && page->type == LOCAL_PAGE && page->index >= 0 && page->index < ain->nr_functions) {
+			func_name = display_sjis0(ain->functions[page->index].name);
+		}
+	}
+
+	WARNING("Invalid variable reference at ip=0x%08X in %s: heap=%d page=%d stack_ptr=%d call_stack_ptr=%d",
+			instr_ptr, func_name, heap_index, page_index, stack_ptr, call_stack_ptr);
+	if (!heap_index_valid(heap_index))
+		return;
+
+	heap_describe_slot(heap_index);
+	if (heap[heap_index].page) {
+		WARNING("Referenced page metadata: type=%d index=%d nr_vars=%d",
+				heap[heap_index].page->type,
+				heap[heap_index].page->index,
+				heap[heap_index].page->nr_vars);
+	}
+}
+
 // Pop a reference off the stack, returning the address of the referenced object.
 static union vm_value *stack_pop_var(void)
 {
 	int32_t page_index = stack_pop().i;
 	int32_t heap_index = stack_pop().i;
-	if (unlikely(!heap_index_valid(heap_index)))
+	if (unlikely(!heap_index_valid(heap_index))) {
+		log_invalid_var_ref(heap_index, page_index);
 		VM_ERROR("Out of bounds heap index: %d/%d", heap_index, page_index);
-	if (unlikely(!heap[heap_index].page || page_index >= heap[heap_index].page->nr_vars))
+	}
+	if (unlikely(!heap[heap_index].page || page_index >= heap[heap_index].page->nr_vars)) {
+		log_invalid_var_ref(heap_index, page_index);
 		VM_ERROR("Out of bounds page index: %d/%d", heap_index, page_index);
+	}
 	return &heap[heap_index].page->values[page_index];
 }
 
@@ -208,10 +236,14 @@ union vm_value *stack_peek_var(void)
 {
 	int32_t page_index = stack_peek(0).i;
 	int32_t heap_index = stack_peek(1).i;
-	if (unlikely(!heap_index_valid(heap_index)))
+	if (unlikely(!heap_index_valid(heap_index))) {
+		log_invalid_var_ref(heap_index, page_index);
 		VM_ERROR("Out of bounds heap index: %d/%d", heap_index, page_index);
-	if (unlikely(!heap[heap_index].page || page_index >= heap[heap_index].page->nr_vars))
+	}
+	if (unlikely(!heap[heap_index].page || page_index >= heap[heap_index].page->nr_vars)) {
+		log_invalid_var_ref(heap_index, page_index);
 		VM_ERROR("Out of bounds page index: %d/%d", heap_index, page_index);
+	}
 	return &heap[heap_index].page->values[page_index];
 }
 
@@ -498,7 +530,19 @@ static void system_call(enum syscall_code code)
 {
 	switch (code) {
 	case SYS_EXIT: {// system.Exit(int nResult)
-		vm_exit(stack_pop().i);
+		int exit_code = stack_pop().i;
+		sys_warning("system.Exit(%d) called from %s (0x%X)\n",
+				exit_code, current_instruction_name(), instr_ptr);
+		vm_stack_trace();
+		// NOTE: vm_reset() was previously attempted here for exit_code==0 so the
+		// game could loop back to the title screen. However, vm_reset() longjmps
+		// back into vm_execute_ain which calls init_libraries() again on a partially-
+		// cleaned GL/SDL context. On OHOS/BiSheng this re-triggers shader compilation
+		// in a corrupted GPU state, destabilizing the ArkUI graphics pipeline (seen
+		// as TextPattern NULL-deref crashes in libace_compatible.z.so).
+		// Both standalone and plugin builds now call vm_exit() directly.
+		// VintagePomelo host handles restart by calling runner_main() again if needed.
+		vm_exit(exit_code);
 		break;
 	}
 	case SYS_GLOBAL_SAVE: { // system.GlobalSave(string szKeyName, string szFileName)
@@ -523,7 +567,12 @@ static void system_call(enum syscall_code code)
 		break;
 	}
 	case SYS_RESET: {
+#ifdef XSYSTEM4_BUILD_PLUGIN
 		vm_reset();
+#else
+		sys_warning("system.Reset(): standalone build, exiting instead of reset\n");
+		vm_exit(0);
+#endif
 		break;
 	}
 	case SYS_OUTPUT: {// system.Output(string szText)
@@ -607,9 +656,9 @@ static void system_call(enum syscall_code code)
 	};
 	case SYS_GET_SAVE_FOLDER_NAME: {// system.GetSaveFolderName(void)
 		if (config.save_dir) {
-			char *sjis = utf2sjis(config.save_dir, strlen(config.save_dir));
-			stack_push_string(make_string(sjis, strlen(sjis)));
-			free(sjis);
+			char *vm_dir = utf8_to_vm_str(config.save_dir);
+			stack_push_string(make_string(vm_dir, strlen(vm_dir)));
+			free(vm_dir);
 		} else {
 			stack_push_string(string_ref(&EMPTY_STRING));
 		}
@@ -626,7 +675,7 @@ static void system_call(enum syscall_code code)
 	case SYS_ERROR: {// system.Error(string szText)
 		int result = 0;
 		struct string *str = stack_peek_string(0);
-		char *utf = sjis2utf(str->text, str->size);
+		char *utf = vm_str_to_utf8(str->text, str->size);
 		sys_warning("*GAME ERROR*: %s\n", utf);
 		const SDL_MessageBoxData mbox = {
 			SDL_MESSAGEBOX_ERROR,
@@ -1561,12 +1610,12 @@ static enum opcode execute_instruction(enum opcode opcode)
 	}
 	case S_LENGTH: {
 		int str = stack_pop_var()->i;
-		stack_push(sjis_count_char(heap_get_string(str)->text));
+		stack_push(vm_count_char(heap_get_string(str)->text));
 		break;
 	}
 	case S_LENGTH2: {
 		int str = stack_pop().i;
-		stack_push(sjis_count_char(heap_get_string(str)->text));
+		stack_push(vm_count_char(heap_get_string(str)->text));
 		heap_unref(str);
 		break;
 	}
@@ -2504,6 +2553,10 @@ void vm_sleep(int ms)
 
 _Noreturn void vm_exit(int code)
 {
+	sys_warning("vm_exit(%d) at %s (0x%X)\n", code,
+			current_instruction_name(), instr_ptr);
+	vm_stack_trace();
+
 	vm_free();
 #ifdef DEBUG_HEAP
 	for (size_t i = 0; i < heap_size; i++) {

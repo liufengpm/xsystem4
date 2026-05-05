@@ -174,6 +174,20 @@ static struct effect_shader *effect_shaders[NR_EFFECTS] = {
 	[EFFECT_VWAVE_CROSSFADE] = &vwave_crossfade_shader,
 };
 
+/* Pre-warm all effect shaders at GL init time to avoid on-demand shader
+ * compilation during gameplay.  BiSheng (Maleoon GPU) crashes when
+ * glLinkProgram is called mid-frame from the game thread.  Calling this
+ * from gfx_init() (before the first frame) compiles every effect shader
+ * once on the GL thread so all subsequent effect_init() calls are no-ops
+ * for the shader load step. */
+void effect_prewarm_shaders(void)
+{
+	for (int i = 0; i < NR_EFFECTS; i++) {
+		if (effect_shaders[i] && !effect_shaders[i]->s.program)
+			load_effect_shader(effect_shaders[i]);
+	}
+}
+
 static void effect_fadeout(Texture *dst, Texture *old, Texture *new, float rate)
 {
 	gfx_copy_bright(dst, 0, 0, old, 0, 0, old->w, old->h, (1.0f - rate) * 255);
@@ -341,14 +355,20 @@ int effect_update(float rate)
 
 	if (effect_functions[effect.type]) {
 		effect_functions[effect.type](&effect.view, &effect.old, gfx_main_surface(), rate);
+		gfx_swap();
 	} else {
 		Texture new;
 		gfx_copy_main_surface(&new);
 		render_effect_shader(effect_shaders[effect.type], &effect.view, &effect.old, &new, rate);
+		/* gfx_swap (eglSwapBuffers) must complete before deleting the texture.
+		 * On Maleoon (libmaleoon_v200), glDeleteTextures immediately frees the
+		 * driver-internal object without reference-counting pending commands.
+		 * Deleting 'new' before swap causes gpu-work-server to dereference a
+		 * zeroed object (SIGSEGV/PC=0x0). After swap returns the GPU has fully
+		 * consumed all submitted commands, so the delete is safe. */
+		gfx_swap();
 		gfx_delete_texture(&new);
 	}
-
-	gfx_swap();
 	return 1;
 }
 

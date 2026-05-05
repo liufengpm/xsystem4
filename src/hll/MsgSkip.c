@@ -39,11 +39,29 @@ static char *save_path;
 static uint8_t *flags;
 static int nr_flags;
 
+static const char *strip_leading_current_dir(const char *path)
+{
+	while (path[0] == '.' && (path[1] == '/' || path[1] == '\\'))
+		path += 2;
+	return path;
+}
+
+static const char *strip_save_data_prefix(const char *path)
+{
+	path = strip_leading_current_dir(path);
+	if (!strncmp(path, "SaveData/", 9) || !strncmp(path, "SaveData\\", 9))
+		return path + 9;
+	return path;
+}
+
 static void msgskip_save(void)
 {
 	FILE *f = file_open_utf8(save_path, "wb");
 	if (!f)
-		ERROR("fopen: '%s': %s", display_utf0(save_path), strerror(errno));
+		{
+			WARNING("fopen: '%s': %s", display_utf0(save_path), strerror(errno));
+			return;
+		}
 
 	uint8_t header[4];
 	LittleEndian_putDW(header, 0, nr_flags);
@@ -74,11 +92,7 @@ static int MsgSkip_Init(struct string *name)
 	// Most games have system.GetSaveFolderName() prepended to `name`, but some
 	// games pass a constant string "SaveData\\MsgSkip.asd". If you pass it to
 	// savedir_path() as it is, "SaveData/" will be duplicated, so remove it.
-	if (!strncmp(name->text, "SaveData\\", 9)) {
-		save_path = savedir_path(name->text + 9);
-	} else {
-		save_path = savedir_path(name->text);
-	}
+	save_path = savedir_path(strip_save_data_prefix(name->text));
 
 	size_t data_size;
 	uint8_t *data = file_read(save_path, &data_size);

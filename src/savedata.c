@@ -83,11 +83,47 @@ cJSON *load_json(const char *filename)
 
 static int get_group_index(const char *name)
 {
+	char *alias = NULL;
+
 	for (int i = 0; i < ain->nr_global_groups; i++) {
 		if (!strcmp(ain->global_group_names[i], name))
 			return i;
 	}
+
+	alias = xsystem4_resource_lookup_alias(name);
+	if (!alias)
+		return -1;
+	for (int i = 0; i < ain->nr_global_groups; i++) {
+		if (!strcmp(ain->global_group_names[i], alias)) {
+			free(alias);
+			return i;
+		}
+	}
+	free(alias);
 	return -1;
+}
+
+static bool savedata_names_match(const char *lhs, const char *rhs)
+{
+	char *alias;
+
+	if (!strcmp(lhs, rhs))
+		return true;
+
+	alias = xsystem4_resource_lookup_alias(lhs);
+	if (alias) {
+		bool matched = !strcmp(alias, rhs);
+		free(alias);
+		if (matched)
+			return true;
+	}
+
+	alias = xsystem4_resource_lookup_alias(rhs);
+	if (!alias)
+		return false;
+	bool matched = !strcmp(lhs, alias);
+	free(alias);
+	return matched;
 }
 
 static int32_t add_value_to_gsave(enum ain_data_type type, union vm_value val, struct gsave *save);
@@ -382,8 +418,11 @@ static int load_globals_from_json(const char *path, const char *keyname, const c
 	}
 
 	cJSON *key = cJSON_GetObjectItem(save, "key");
-	if (!key || strcmp(keyname, cJSON_GetStringValue(key)))
-		VM_ERROR("Attempted to load save data with wrong key: %s", display_sjis0(keyname));
+	if (!key || strcmp(keyname, cJSON_GetStringValue(key))) {
+		NOTICE("Skipping incompatible save data with wrong key: %s", display_utf0(keyname));
+		retval = 1;
+		goto cleanup;
+	}
 
 	if (group_name) {
 		// TODO?
@@ -536,14 +575,18 @@ static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type t
 
 int load_globals_from_gsave(struct gsave *save, const char *keyname, const char *group_name, int *n)
 {
-	if (strcmp(keyname, save->key))
-		VM_ERROR("Attempted to load save data with wrong key: %s", display_sjis0(keyname));
+	if (!savedata_names_match(keyname, save->key)) {
+		NOTICE("Skipping incompatible save data with wrong key: %s", display_utf0(keyname));
+		return 1;
+	}
 	if (!group_name)
 		group_name = "";
 	if (!save->group)
 		save->group = strdup("");
-	if (strcmp(group_name, save->group))
-		VM_ERROR("Attempted to load save data with wrong group name: '%s'", display_sjis0(group_name));
+	if (!savedata_names_match(group_name, save->group)) {
+		NOTICE("Skipping incompatible save data with wrong group name: '%s'", display_utf0(group_name));
+		return 1;
+	}
 
 	for (struct gsave_global *g = save->globals; g < save->globals + save->nr_globals; g++) {
 		int global_index = ain_get_global(ain, g->name);

@@ -313,7 +313,7 @@ static int scene_struct_no(void)
 {
 	static int no = -1;
 	if (no < 0) {
-		char *s = utf2sjis("画面保管_t", 0);
+		char *s = xsystem4_utf8_to_ain_text("画面保管_t");
 		no = ain_get_struct(ain, s);
 		free(s);
 		if (no < 0)

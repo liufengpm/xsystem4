@@ -150,8 +150,14 @@ void CharSpriteManager_Clear(void)
 	}
 }
 
-static int extract_sjis_char(char *src, char *dst)
+static int extract_charsprite_char(const char *src, char *dst)
 {
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	int len = vm_char_size(src);
+	memcpy(dst, src, len);
+	dst[len] = '\0';
+	return len;
+#else
 	if (SJIS_2BYTE(*src)) {
 		dst[0] = src[0];
 		dst[1] = src[1];
@@ -161,12 +167,13 @@ static int extract_sjis_char(char *src, char *dst)
 	dst[0] = src[0];
 	dst[1] = '\0';
 	return 1;
+#endif
 }
 
 static void charsprite_render(struct charsprite *cs)
 {
-	char ch[3];
-	extract_sjis_char(cs->ch->text, ch);
+	char ch[5];
+	extract_charsprite_char(cs->ch->text, ch);
 
 	// XXX: this is handled here and not in gfx_render_text because of the
 	//      width calculation below

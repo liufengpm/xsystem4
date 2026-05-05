@@ -14,6 +14,8 @@
  * along with this program; if not, see <http://gnu.org/licenses/>.
  */
 
+#include <math.h>
+
 #include "system4.h"
 #include "system4/fnl.h"
 #include "system4/hashtable.h"
@@ -128,6 +130,20 @@ static struct fnl_bitmap_glyph *fnl_get_bitmap_glyph(struct fnl_bitmap_size *bit
 	return out;
 }
 
+static bool fnl_font_has_glyph(struct font *_font, uint32_t code)
+{
+	struct font_fnl *font = (struct font_fnl*)_font;
+	for (unsigned i = 0; i < font->nr_sizes; i++) {
+		struct fnl_font_size *size = &font->sizes[i];
+		unsigned index = fnl_char_to_index(code);
+		if (index >= size->bitmap_size->nr_glyphs)
+			continue;
+		if (size->bitmap_size->face->glyphs[index].data_pos)
+			return true;
+	}
+	return false;
+}
+
 #define GLYPH_BORDER_SIZE 4
 
 static bool fnl_font_get_glyph(struct font_size *_size, struct glyph *glyph, uint32_t code, enum font_weight weight)
@@ -233,6 +249,7 @@ struct font *fnl_font_load(struct fnl *lib, unsigned index)
 	font->super.get_size = fnl_font_get_size;
 	font->super.get_actual_size = fnl_font_get_actual_size;
 	font->super.get_actual_size_round_down = fnl_font_get_actual_size_round_down;
+	font->super.has_glyph = fnl_font_has_glyph;
 	font->super.get_glyph = fnl_font_get_glyph;
 	font->super.size_char = fnl_font_size_char;
 	font->super.size_char_kerning = fnl_font_size_char_kerning;

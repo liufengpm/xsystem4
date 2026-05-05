@@ -77,6 +77,10 @@ static struct copy_shader hitbox_noblend_shader;
 static struct copy_shader amap_saturate_shader;
 static struct copy_shader blend_rmap_color_shader;
 static struct copy_shader dilate_shader;
+static bool logged_texture_feedback_guard;
+
+static void run_copy_shader(Shader *s, Texture *dst, Texture *src, struct copy_data *data);
+static void restore_blend_mode(void);
 
 static void prepare_copy_shader(struct gfx_render_job *job, void *data)
 {
@@ -92,6 +96,8 @@ static void prepare_copy_shader(struct gfx_render_job *job, void *data)
 
 static void load_copy_shader(struct copy_shader *s, const char *v_path, const char *f_path)
 {
+	if (s->s.program)
+		return; /* already loaded; idempotent for lazy call sites */
 	gfx_load_shader(&s->s, v_path, f_path);
 	s->bot_left = glGetUniformLocation(s->s.program, "bot_left");
 	s->top_right = glGetUniformLocation(s->s.program, "top_right");
@@ -104,65 +110,58 @@ static void load_copy_shader(struct copy_shader *s, const char *v_path, const ch
 // load shaders
 void gfx_draw_init(void)
 {
+	/* Boot-critical shaders: must be ready before the first draw/fill/text operation. */
 	// generic copy shader; discards fragments outside of a given rectangle
 	load_copy_shader(&copy_shader, "shaders/render.v.glsl", "shaders/copy.f.glsl");
-
-	// copy shader which inverts colors
-	load_copy_shader(&copy_color_reverse_shader, "shaders/render.v.glsl", "shaders/copy_color_reverse.f.glsl");
-
-	// copy shader which also discards fragments matching a color key
-	load_copy_shader(&copy_key_shader, "shaders/render.v.glsl", "shaders/copy_key.f.glsl");
-
-	// copy shader which also discards fragments matching an alpha key
-	load_copy_shader(&copy_alpha_key_shader, "shaders/render.v.glsl", "shaders/copy_alpha_key.f.glsl");
-
-	// copy shader that only keeps fragments below a certain alpha threshold
-	load_copy_shader(&copy_use_amap_under_shader, "shaders/render.v.glsl", "shaders/copy_use_amap_under.f.glsl");
-
-	// copy shader that only keeps fragments above a certain alpha threshold
-	load_copy_shader(&copy_use_amap_border_shader, "shaders/render.v.glsl", "shaders/copy_use_amap_border.f.glsl");
-
-	// copy shader with grayscale conversion
-	load_copy_shader(&copy_grayscale_shader, "shaders/render.v.glsl", "shaders/copy_grayscale.f.glsl");
-
-	// copy shader that sets source RGB to a constant
-	load_copy_shader(&blend_amap_color_shader, "shaders/render.v.glsl", "shaders/blend_amap_color.f.glsl");
-
-	// copy shader that multiples the source color and alpha by a constant
-	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
-
-	load_copy_shader(&blend_use_amap_color_shader, "shaders/render.v.glsl", "shaders/blend_use_amap_color.f.glsl");
-
 	// basic fill shader
 	load_copy_shader(&fill_shader, "shaders/render.v.glsl", "shaders/fill.f.glsl");
-
-	// fill shader that only fills fragments above a certain alpha threshold
-	load_copy_shader(&fill_amap_over_border_shader, "shaders/render.v.glsl", "shaders/fill_amap_over_border.f.glsl");
-
-	// fill shader that only fills fragments below a certain alpha threshold
-	load_copy_shader(&fill_amap_under_border_shader, "shaders/render.v.glsl", "shaders/fill_amap_under_border.f.glsl");
-
-	// fill shader that fills the alpha map with a gradient
-	load_copy_shader(&fill_amap_gradation_ud_shader, "shaders/render.v.glsl", "shaders/fill_amap_gradation_ud.f.glsl");
-
-	// shader that discards texels that fail a hitbox test
-	load_copy_shader(&hitbox_shader, "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
-
-	// hitbox shader which ignores alpha component of texture (a=1)
-	load_copy_shader(&hitbox_noblend_shader, "shaders/render.v.glsl", "shaders/hitbox_noblend.f.glsl");
-
-	// shader that sets the color to black or white depending on alpha value
-	load_copy_shader(&amap_saturate_shader, "shaders/render.v.glsl", "shaders/amap_saturate.f.glsl");
-
-	// shader that sets source RGB to a constant, using source red channel as alpha
+	// glyph raster shader — needed for text as soon as the first scene appears
 	load_copy_shader(&blend_rmap_color_shader, "shaders/render.v.glsl", "shaders/blend_rmap_color.f.glsl");
 
-	// shader that dilates every pixel (for bold/outline text rendering)
-	load_copy_shader(&dilate_shader, "shaders/render.v.glsl", "shaders/dilate.f.glsl");
+	/* Pre-compile every remaining copy shader at init time so that all lazy
+	 * call sites in gameplay find s->s.program != 0 and skip compilation.
+	 * This avoids late shader compilation that can crash certain GPU compilers
+	 * (e.g. BiSheng on HiSilicon Kirin) and also improves first-frame latency
+	 * on ANGLE and other GLES backends.
+	 * load_copy_shader() is idempotent (checks s->s.program), so this is safe. */
+	load_copy_shader(&copy_key_shader,              "shaders/render.v.glsl", "shaders/copy_key.f.glsl");
+	load_copy_shader(&copy_alpha_key_shader,        "shaders/render.v.glsl", "shaders/copy_alpha_key.f.glsl");
+	load_copy_shader(&copy_color_reverse_shader,    "shaders/render.v.glsl", "shaders/copy_color_reverse.f.glsl");
+	load_copy_shader(&copy_grayscale_shader,        "shaders/render.v.glsl", "shaders/copy_grayscale.f.glsl");
+	load_copy_shader(&copy_use_amap_under_shader,   "shaders/render.v.glsl", "shaders/copy_use_amap_under.f.glsl");
+	load_copy_shader(&copy_use_amap_border_shader,  "shaders/render.v.glsl", "shaders/copy_use_amap_border.f.glsl");
+	load_copy_shader(&blend_amap_color_shader,      "shaders/render.v.glsl", "shaders/blend_amap_color.f.glsl");
+	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
+	load_copy_shader(&blend_use_amap_color_shader,  "shaders/render.v.glsl", "shaders/blend_use_amap_color.f.glsl");
+	load_copy_shader(&fill_amap_over_border_shader, "shaders/render.v.glsl", "shaders/fill_amap_over_border.f.glsl");
+	load_copy_shader(&fill_amap_under_border_shader,"shaders/render.v.glsl", "shaders/fill_amap_under_border.f.glsl");
+	load_copy_shader(&fill_amap_gradation_ud_shader,"shaders/render.v.glsl", "shaders/fill_amap_gradation_ud.f.glsl");
+	load_copy_shader(&hitbox_shader,                "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
+	load_copy_shader(&hitbox_noblend_shader,        "shaders/render.v.glsl", "shaders/hitbox_noblend.f.glsl");
+	load_copy_shader(&amap_saturate_shader,         "shaders/render.v.glsl", "shaders/amap_saturate.f.glsl");
+	load_copy_shader(&dilate_shader,                "shaders/render.v.glsl", "shaders/dilate.f.glsl");
 }
 
 static void run_draw_shader(Shader *s, Texture *dst, Texture *src, mat4 mw_transform, mat4 wv_transform, struct copy_data *data)
 {
+	Texture sampled_src = {0};
+	/* Sampling from the same texture bound as the draw attachment is
+	 * undefined behavior. Desktop GL often lets this slide, but ANGLE is
+	 * much stricter and will manifest it as missing layers or corrupted
+	 * alpha results. Clone the source first for self-blit operations. */
+	if (src && dst && src->handle && dst->handle && src->handle == dst->handle) {
+		struct copy_data snapshot = COPY_DATA(0, 0, 0, 0, src->w, src->h);
+		gfx_init_texture_blank(&sampled_src, src->w, src->h);
+		glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
+		run_copy_shader(&copy_shader.s, &sampled_src, src, &snapshot);
+		restore_blend_mode();
+		if (!logged_texture_feedback_guard) {
+			NOTICE("xsystem4 draw path: enabled self-blit feedback guard");
+			logged_texture_feedback_guard = true;
+		}
+		src = &sampled_src;
+	}
+
 	GLuint fbo = gfx_set_framebuffer(GL_DRAW_FRAMEBUFFER, dst, data->vpx, data->vpy, data->vpw, data->vph);
 
 	struct gfx_render_job job = {
@@ -176,6 +175,8 @@ static void run_draw_shader(Shader *s, Texture *dst, Texture *src, mat4 mw_trans
 	gfx_render(&job);
 
 	gfx_reset_framebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+	if (sampled_src.handle)
+		gfx_delete_texture(&sampled_src);
 }
 
 static void _run_copy_shader(Shader *s, Texture *dst, Texture *src, GLfloat src_w, GLfloat src_h, struct copy_data *data)
@@ -247,6 +248,7 @@ void gfx_copy_bright(Texture *dst, int dx, int dy, Texture *src, int sx, int sy,
 
 void gfx_copy_sprite(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, SDL_Color color)
 {
+	load_copy_shader(&copy_key_shader, "shaders/render.v.glsl", "shaders/copy_key.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -260,6 +262,7 @@ void gfx_copy_sprite(Texture *dst, int dx, int dy, Texture *src, int sx, int sy,
 
 void gfx_sprite_copy_amap(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int alpha_key)
 {
+	load_copy_shader(&copy_alpha_key_shader, "shaders/render.v.glsl", "shaders/copy_alpha_key.f.glsl");
 	glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -271,6 +274,7 @@ void gfx_sprite_copy_amap(Texture *dst, int dx, int dy, Texture *src, int sx, in
 
 void gfx_copy_color_reverse(struct texture *dst, int dx, int dy, struct texture *src, int sx, int sy, int w, int h)
 {
+	load_copy_shader(&copy_color_reverse_shader, "shaders/render.v.glsl", "shaders/copy_color_reverse.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -281,6 +285,7 @@ void gfx_copy_color_reverse(struct texture *dst, int dx, int dy, struct texture 
 
 void gfx_copy_use_amap_under(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int threshold)
 {
+	load_copy_shader(&copy_use_amap_under_shader, "shaders/render.v.glsl", "shaders/copy_use_amap_under.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -292,6 +297,7 @@ void gfx_copy_use_amap_under(Texture *dst, int dx, int dy, Texture *src, int sx,
 
 void gfx_copy_use_amap_border(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int threshold)
 {
+	load_copy_shader(&copy_use_amap_border_shader, "shaders/render.v.glsl", "shaders/copy_use_amap_border.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -379,6 +385,7 @@ void gfx_blend_amap_src_only(Texture *dst, int dx, int dy, Texture *src, int sx,
 
 void gfx_blend_amap_color(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int r, int g, int b)
 {
+	load_copy_shader(&blend_amap_color_shader, "shaders/render.v.glsl", "shaders/blend_amap_color.f.glsl");
 	// color = (r,g,b) * src_alpha + dst_color * (1 - src_alpha)
 	// alpha = dst_alpha
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
@@ -395,6 +402,7 @@ void gfx_blend_amap_color(Texture *dst, int dx, int dy, Texture *src, int sx, in
 
 void gfx_blend_amap_color_alpha(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int r, int g, int b, int a)
 {
+	load_copy_shader(&blend_amap_color_shader, "shaders/render.v.glsl", "shaders/blend_amap_color.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -409,6 +417,7 @@ void gfx_blend_amap_color_alpha(Texture *dst, int dx, int dy, Texture *src, int 
 
 void gfx_blend_amap_alpha(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int a)
 {
+	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -423,6 +432,7 @@ void gfx_blend_amap_alpha(Texture *dst, int dx, int dy, Texture *src, int sx, in
 
 void gfx_blend_amap_bright(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int rate)
 {
+	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -437,6 +447,7 @@ void gfx_blend_amap_bright(Texture *dst, int dx, int dy, Texture *src, int sx, i
 
 void gfx_blend_amap_alpha_src_bright(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int alpha, int rate)
 {
+	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -451,6 +462,7 @@ void gfx_blend_amap_alpha_src_bright(Texture *dst, int dx, int dy, Texture *src,
 
 void gfx_blend_use_amap_color(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int r, int g, int b, int rate)
 {
+	load_copy_shader(&blend_use_amap_color_shader, "shaders/render.v.glsl", "shaders/blend_use_amap_color.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -487,6 +499,7 @@ void gfx_blend_multiply(Texture *dst, int dx, int dy, Texture *src, int sx, int 
 
 void gfx_blend_screen_alpha(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h, int a)
 {
+	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_COLOR, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -540,6 +553,7 @@ void gfx_fill_amap(Texture *dst, int x, int y, int w, int h, int a)
 
 void gfx_fill_amap_over_border(Texture *dst, int x, int y, int w, int h, int alpha, int border)
 {
+	load_copy_shader(&fill_amap_over_border_shader, "shaders/render.v.glsl", "shaders/fill_amap_over_border.f.glsl");
 	glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
 
 	struct copy_data data = COPY_DATA(x, y, 0, 0, w, h);
@@ -552,6 +566,7 @@ void gfx_fill_amap_over_border(Texture *dst, int x, int y, int w, int h, int alp
 
 void gfx_fill_amap_under_border(Texture *dst, int x, int y, int w, int h, int alpha, int border)
 {
+	load_copy_shader(&fill_amap_under_border_shader, "shaders/render.v.glsl", "shaders/fill_amap_under_border.f.glsl");
 	glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
 
 	struct copy_data data = COPY_DATA(x, y, 0, 0, w, h);
@@ -564,6 +579,7 @@ void gfx_fill_amap_under_border(Texture *dst, int x, int y, int w, int h, int al
 
 void gfx_fill_amap_gradation_ud(Texture *dst, int x, int y, int w, int h, int up_a, int down_a)
 {
+	load_copy_shader(&fill_amap_gradation_ud_shader, "shaders/render.v.glsl", "shaders/fill_amap_gradation_ud.f.glsl");
 	glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
 
 	struct copy_data data = COPY_DATA(x, y, 0, 0, w, h);
@@ -604,6 +620,7 @@ void gfx_fill_multiply(Texture *dst, int x, int y, int w, int h, int r, int g, i
 
 void gfx_satur_dp_dpxsa(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h)
 {
+	load_copy_shader(&amap_saturate_shader, "shaders/render.v.glsl", "shaders/amap_saturate.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -729,6 +746,7 @@ void gfx_copy_stretch_blend_amap(struct texture *dst, int dx, int dy, int dw, in
 
 void gfx_copy_stretch_blend_amap_alpha(struct texture *dst, int dx, int dy, int dw, int dh, struct texture *src, int sx, int sy, int sw, int sh, int a)
 {
+	load_copy_shader(&blend_amap_alpha_bright_shader, "shaders/render.v.glsl", "shaders/blend_amap_alpha_bright.f.glsl");
 	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	struct copy_data data = STRETCH_DATA(dx, dy, dw, dh, sx, sy, sw, sh);
@@ -767,12 +785,14 @@ static void copy_rot_zoom(Texture *dst, Texture *src, int sx, int sy, int w, int
 
 void gfx_copy_rot_zoom(Texture *dst, Texture *src, int sx, int sy, int w, int h, float rotate, float mag)
 {
+	load_copy_shader(&hitbox_noblend_shader, "shaders/render.v.glsl", "shaders/hitbox_noblend.f.glsl");
 	gfx_fill_amap(dst, 0, 0, dst->w, dst->h, 0);
 	copy_rot_zoom(dst, src, sx, sy, w, h, rotate, mag, &hitbox_noblend_shader.s);
 }
 
 void gfx_copy_rot_zoom_amap(Texture *dst, Texture *src, int sx, int sy, int w, int h, float rotate, float mag)
 {
+	load_copy_shader(&hitbox_shader, "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
 	gfx_fill_amap(dst, 0, 0, dst->w, dst->h, 0);
 
 	glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
@@ -782,11 +802,13 @@ void gfx_copy_rot_zoom_amap(Texture *dst, Texture *src, int sx, int sy, int w, i
 
 void gfx_copy_rot_zoom_use_amap(Texture *dst, Texture *src, int sx, int sy, int w, int h, float rotate, float mag)
 {
+	load_copy_shader(&hitbox_shader, "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
 	copy_rot_zoom(dst, src, sx, sy, w, h, rotate, mag, &hitbox_shader.s);
 }
 
 void gfx_copy_rot_zoom2(Texture *dst, float cx, float cy, Texture *src, float scx, float scy, float rot, float mag)
 {
+	load_copy_shader(&hitbox_shader, "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
 	gfx_fill_amap(dst, 0, 0, dst->w, dst->h, 0);
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
 
@@ -839,11 +861,13 @@ static void copy_rotate_y(Texture *dst, Texture *front, Texture *back, int sx, i
 
 void gfx_copy_rotate_y(Texture *dst, Texture *front, Texture *back, int sx, int sy, int w, int h, float rot, float mag)
 {
+	load_copy_shader(&hitbox_noblend_shader, "shaders/render.v.glsl", "shaders/hitbox_noblend.f.glsl");
 	copy_rotate_y(dst, front, back, sx, sy, w, h, rot, mag, &hitbox_noblend_shader.s);
 }
 
 void gfx_copy_rotate_y_use_amap(Texture *dst, Texture *front, Texture *back, int sx, int sy, int w, int h, float rot, float mag)
 {
+	load_copy_shader(&hitbox_shader, "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
 	copy_rotate_y(dst, front, back, sx, sy, w, h, rot, mag, &hitbox_shader.s);
 }
 
@@ -878,11 +902,13 @@ static void copy_rotate_x(Texture *dst, Texture *front, Texture *back, int sx, i
 
 void gfx_copy_rotate_x(Texture *dst, Texture *front, Texture *back, int sx, int sy, int w, int h, float rot, float mag)
 {
+	load_copy_shader(&hitbox_noblend_shader, "shaders/render.v.glsl", "shaders/hitbox_noblend.f.glsl");
 	copy_rotate_x(dst, front, back, sx, sy, w, h, rot, mag, &hitbox_noblend_shader.s);
 }
 
 void gfx_copy_rotate_x_use_amap(Texture *dst, Texture *front, Texture *back, int sx, int sy, int w, int h, float rot, float mag)
 {
+	load_copy_shader(&hitbox_shader, "shaders/render.v.glsl", "shaders/hitbox.f.glsl");
 	copy_rotate_x(dst, front, back, sx, sy, w, h, rot, mag, &hitbox_shader.s);
 }
 
@@ -1086,6 +1112,7 @@ void gfx_copy_stretch_with_alpha_map(Texture *dst, int dx, int dy, int dw, int d
 
 void gfx_copy_grayscale(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h)
 {
+	load_copy_shader(&copy_grayscale_shader, "shaders/render.v.glsl", "shaders/copy_grayscale.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -1096,6 +1123,7 @@ void gfx_copy_grayscale(Texture *dst, int dx, int dy, Texture *src, int sx, int 
 
 void gfx_copy_grayscale_with_alpha_map(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h)
 {
+	load_copy_shader(&copy_grayscale_shader, "shaders/render.v.glsl", "shaders/copy_grayscale.f.glsl");
 	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ONE, GL_ZERO);
 
 	struct copy_data data = COPY_DATA(dx, dy, sx, sy, w, h);
@@ -1106,6 +1134,7 @@ void gfx_copy_grayscale_with_alpha_map(Texture *dst, int dx, int dy, Texture *sr
 
 void gfx_copy_grayscale_reverse_LR_with_alpha_map(Texture *dst, int dx, int dy, Texture *src, int sx, int sy, int w, int h)
 {
+	load_copy_shader(&copy_grayscale_shader, "shaders/render.v.glsl", "shaders/copy_grayscale.f.glsl");
 	mat4 mw_transform = MAT4(
 	     -src->w, 0,      0, sx + w,
 	     0,       src->h, 0, -sy,
@@ -1204,6 +1233,10 @@ void gfx_draw_glyph(Texture *dst, float dx, int dy, Texture *glyph, SDL_Color co
 	if (bold_width < 0.01) {
 		run_copy_shader(&blend_rmap_color_shader.s, dst, glyph, &data);
 	} else {
+		// BiSheng GPU compiler (Mate 80 / Kirin X90) crashes if glLinkProgram is
+		// called during normal text rendering, so load the dilate shader only when
+		// actually needed for bold/outline glyph dilation.
+		load_copy_shader(&dilate_shader, "shaders/render.v.glsl", "shaders/dilate.f.glsl");
 		data.threshold = bold_width;
 		run_copy_shader(&dilate_shader.s, dst, glyph, &data);
 	}

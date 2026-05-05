@@ -33,6 +33,24 @@ static struct ex *ex;
 static struct ex_value **handles = NULL;
 static unsigned nr_handles = 0;
 
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+static struct string *main_exfile_convert_string(const char *text, size_t len)
+{
+	char *raw = xmalloc(len + 1);
+	memcpy(raw, text, len);
+	raw[len] = '\0';
+
+	char *utf8 = xsystem4_resource_text_to_utf8(raw);
+	free(raw);
+	if (!utf8)
+		return make_string(text, len);
+
+	struct string *out = cstr_to_string(utf8);
+	free(utf8);
+	return out;
+}
+#endif
+
 static int set_indices(struct ex_value *val, int id)
 {
 	val->id = id++;
@@ -104,7 +122,16 @@ static void map_handles(struct ex_value *val)
 static void MainEXFile_ModuleInit(void)
 {
 	// load .ex file
-	if (!config.ex_path || !(ex = ex_read_file(config.ex_path)))
+	if (!config.ex_path)
+		ERROR("Failed to load .ex file: %s", display_utf0(config.ex_path));
+
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	ex = ex_read_file_conv(config.ex_path, main_exfile_convert_string);
+#else
+	ex = ex_read_file(config.ex_path);
+#endif
+
+	if (!ex)
 		ERROR("Failed to load .ex file: %s", display_utf0(config.ex_path));
 
 	// assign IDs to each ex_value
@@ -132,12 +159,54 @@ static void MainEXFile_ModuleFini(void)
 
 HLL_WARN_UNIMPLEMENTED(false, bool, MainEXFile, ReloadDebugEXFile, void);
 
+static struct ex_value *ex_get_flexible(struct ex *root, const char *key)
+{
+	struct ex_value *v = ex_get(root, key);
+	if (v)
+		return v;
+
+	char *alias = xsystem4_resource_lookup_alias(key);
+	if (!alias)
+		return NULL;
+	v = ex_get(root, alias);
+	free(alias);
+	return v;
+}
+
+static int ex_col_from_name_flexible(struct ex_table *t, const char *name)
+{
+	int col = ex_col_from_name(t, name);
+	if (col >= 0)
+		return col;
+
+	char *alias = xsystem4_resource_lookup_alias(name);
+	if (!alias)
+		return -1;
+	col = ex_col_from_name(t, alias);
+	free(alias);
+	return col;
+}
+
+static int ex_row_at_string_key_flexible(struct ex_table *t, const char *key)
+{
+	int row = ex_row_at_string_key(t, key);
+	if (row >= 0)
+		return row;
+
+	char *alias = xsystem4_resource_lookup_alias(key);
+	if (!alias)
+		return -1;
+	row = ex_row_at_string_key(t, alias);
+	free(alias);
+	return row;
+}
+
 /*
  * Get handle for top-level value.
  */
 static int MainEXFile_Handle(struct string *name)
 {
-	struct ex_value *v = ex_get(ex, name->text);
+	struct ex_value *v = ex_get_flexible(ex, name->text);
 	return v ? v->id : 0;
 }
 
@@ -189,7 +258,7 @@ static int MainEXFile_IA2Handle(int handle, int key, struct string *format_name)
 	int row = ex_row_at_int_key(t, key);
 	if (row < 0)
 		return 0;
-	int col = ex_col_from_name(t, format_name->text);
+	int col = ex_col_from_name_flexible(t, format_name->text);
 	if (col < 0)
 		return 0;
 	return t->rows[row][col].id;
@@ -200,10 +269,10 @@ static int MainEXFile_SA2Handle(int handle, struct string *key, struct string *f
 	struct ex_table *t = handle_to_table(handle);
 	if (!t)
 		return 0;
-	int row = ex_row_at_string_key(t, key->text);
+	int row = ex_row_at_string_key_flexible(t, key->text);
 	if (row < 0)
 		return 0;
-	int col = ex_col_from_name(t, format_name->text);
+	int col = ex_col_from_name_flexible(t, format_name->text);
 	if (col < 0)
 		return 0;
 	return t->rows[row][col].id;
@@ -216,7 +285,7 @@ static int MainEXFile_RA2Handle(int handle, int row, struct string *format_name)
 		return 0;
 	if (row < 0 || (unsigned)row >= t->nr_rows)
 		return 0;
-	int col = ex_col_from_name(t, format_name->text);
+	int col = ex_col_from_name_flexible(t, format_name->text);
 	if (col < 0)
 		return 0;
 	return t->rows[row][col].id;
@@ -270,7 +339,7 @@ static int MainEXFile_IA2Type(int handle, int key, struct string *format_name)
 	int row = ex_row_at_int_key(t, key);
 	if (row < 0)
 		return 0;
-	int col = ex_col_from_name(t, format_name->text);
+	int col = ex_col_from_name_flexible(t, format_name->text);
 	if (col < 0)
 		return 0;
 	return t->rows[row][col].type;
@@ -281,10 +350,10 @@ static int MainEXFile_SA2Type(int handle, struct string *key, struct string *for
 	struct ex_table *t = handle_to_table(handle);
 	if (!t)
 		return 0;
-	int row = ex_row_at_string_key(t, key->text);
+	int row = ex_row_at_string_key_flexible(t, key->text);
 	if (row < 0)
 		return 0;
-	int col = ex_col_from_name(t, format_name->text);
+	int col = ex_col_from_name_flexible(t, format_name->text);
 	if (col < 0)
 		return 0;
 	return t->rows[row][col].type;
@@ -334,7 +403,7 @@ static bool MainEXFile_IA2Exists(int handle, int key, struct string *format_name
 	int row = ex_row_at_int_key(t, key);
 	if (row < 0)
 		return 0;
-	return ex_col_from_name(t, format_name->text) >= 0;
+	return ex_col_from_name_flexible(t, format_name->text) >= 0;
 }
 
 static bool MainEXFile_SA2Exists(int handle, struct string *key, struct string *format_name)
@@ -342,10 +411,10 @@ static bool MainEXFile_SA2Exists(int handle, struct string *key, struct string *
 	struct ex_table *t = handle_to_table(handle);
 	if (!t)
 		return 0;
-	int row = ex_row_at_string_key(t, key->text);
+	int row = ex_row_at_string_key_flexible(t, key->text);
 	if (row < 0)
 		return 0;
-	return ex_col_from_name(t, format_name->text) >= 0;
+	return ex_col_from_name_flexible(t, format_name->text) >= 0;
 }
 
 static bool MainEXFile_RA2Exists(int handle, int row, struct string *format_name)
@@ -355,7 +424,7 @@ static bool MainEXFile_RA2Exists(int handle, int row, struct string *format_name
 		return 0;
 	if (row < 0 || (unsigned)row >= t->nr_rows)
 		return 0;
-	return ex_col_from_name(t, format_name->text) >= 0;
+	return ex_col_from_name_flexible(t, format_name->text) >= 0;
 }
 
 static bool MainEXFile_Int(int handle, int *data)
@@ -518,7 +587,7 @@ static int MainEXFile_GetRowAtStringKey(int handle, struct string *key)
 	struct ex_table *t = handle_to_table(handle);
 	if (!t)
 		return -1;
-	return ex_row_at_string_key(t, key->text);
+	return ex_row_at_string_key_flexible(t, key->text);
 }
 
 static bool MainEXFile_IA2Int(int handle, int key, struct string *format_name, int *data)
@@ -595,7 +664,7 @@ static bool MainEXFile_RA2String(int handle, int row, struct string *format_name
 
 static int MainEXFile_GetNodeNameCount(struct string *tree_path)
 {
-	struct ex_value *v = ex_get(ex, tree_path->text);
+	struct ex_value *v = ex_get_flexible(ex, tree_path->text);
 	if (!v || v->type != EX_TREE || v->tree->is_leaf)
 		return 0;
 
@@ -609,7 +678,7 @@ static int MainEXFile_GetNodeNameCount(struct string *tree_path)
 
 static int MainEXFile_GetEXNameCount(struct string *tree_path)
 {
-	struct ex_value *v = ex_get(ex, tree_path->text);
+	struct ex_value *v = ex_get_flexible(ex, tree_path->text);
 	if (!v || v->type != EX_TREE || v->tree->is_leaf)
 		return 0;
 
@@ -623,7 +692,7 @@ static int MainEXFile_GetEXNameCount(struct string *tree_path)
 
 static bool MainEXFile_GetNodeName(struct string *tree_path, int index, struct string **node_name)
 {
-	struct ex_value *v = ex_get(ex, tree_path->text);
+	struct ex_value *v = ex_get_flexible(ex, tree_path->text);
 	if (!v || v->type != EX_TREE || v->tree->is_leaf)
 		return false;
 	if (index < 0 || (unsigned)index >= v->tree->nr_children)
@@ -644,7 +713,7 @@ static bool MainEXFile_GetNodeName(struct string *tree_path, int index, struct s
 
 static bool MainEXFile_GetEXName(struct string *tree_path, int index, struct string **ex_name)
 {
-	struct ex_value *v = ex_get(ex, tree_path->text);
+	struct ex_value *v = ex_get_flexible(ex, tree_path->text);
 	if (!v || v->type != EX_TREE || v->tree->is_leaf)
 		return false;
 	if (index < 0 || (unsigned)index >= v->tree->nr_children)

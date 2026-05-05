@@ -21,17 +21,14 @@ uniform sampler2D texture_cr;
 in vec2 tex_coord;
 out vec4 frag_color;
 
-mat4 rec601 = mat4(
-	1.16438,  0.00000,  1.59603, -0.87079,
-	1.16438, -0.39176, -0.81297,  0.52959,
-	1.16438,  2.01723,  0.00000, -1.08139,
-	0.0,      0.0,      0.0,      1.0
-);
-
 void main() {
 	float y = texture(texture_y, tex_coord).r;
 	float cb = texture(texture_cb, tex_coord).r;
 	float cr = texture(texture_cr, tex_coord).r;
 
-	frag_color = vec4(y, cb, cr, 1.0) * rec601;
+	float r = 1.16438 * y + 1.59603 * cr - 0.87079;
+	float g = 1.16438 * y - 0.39176 * cb - 0.81297 * cr + 0.52959;
+	float b = 1.16438 * y + 2.01723 * cb - 1.08139;
+
+	frag_color = vec4(r, g, b, 1.0);
 }

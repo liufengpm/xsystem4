@@ -15,6 +15,7 @@
  */
 
 #include <limits.h>
+#include <string.h>
 #include <cglm/cglm.h>
 
 #include "system4.h"
@@ -94,6 +95,9 @@ static GLuint load_shader(const char *vertex_shader_path, const char *fragment_s
 	glBindAttribLocation(program, VATTR_BLEND_UV, "vertex_blend_uv");
 
 	glLinkProgram(program);
+	#ifdef __OHOS__
+	glFinish();
+	#endif
 
 	GLint link_success;
 	glGetProgramiv(program, GL_LINK_STATUS, &link_success);
@@ -104,11 +108,18 @@ static GLuint load_shader(const char *vertex_shader_path, const char *fragment_s
 		glGetProgramInfoLog(program, len, NULL, infolog);
 		ERROR("Failed to link shader %s, %s: %s", vertex_shader_path, fragment_shader_path, infolog);
 	}
+	glDetachShader(program, vertex_shader);
+	glDetachShader(program, fragment_shader);
+	glDeleteShader(vertex_shader);
+	glDeleteShader(fragment_shader);
 	return program;
 }
 
-static void init_shadow_renderer(struct shadow_renderer *sr)
+static bool init_shadow_renderer(struct shadow_renderer *sr)
 {
+	if (sr->program)
+		return true;
+
 	GLint orig_fbo;
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &orig_fbo);
 
@@ -127,19 +138,43 @@ static void init_shadow_renderer(struct shadow_renderer *sr)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glGenTextures(1, &sr->color_texture);
+	glBindTexture(GL_TEXTURE_2D, sr->color_texture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R16UI, SHADOW_WIDTH, SHADOW_HEIGHT, 0, GL_RED_INTEGER, GL_UNSIGNED_SHORT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glBindFramebuffer(GL_FRAMEBUFFER, sr->fbo);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sr->texture, 0);
-	glDrawBuffers(0, NULL);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sr->color_texture, 0);
+	GLenum draw_buffers[1] = { GL_COLOR_ATTACHMENT0 };
+	glDrawBuffers(1, draw_buffers);
 	glReadBuffer(GL_NONE);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		ERROR("Incomplete shadow framebuffer");
 
 	glBindFramebuffer(GL_FRAMEBUFFER, orig_fbo);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return true;
 }
 
 static void destroy_shadow_renderer(struct shadow_renderer *sr)
 {
-	glDeleteTextures(1, &sr->texture);
-	glDeleteFramebuffers(1, &sr->fbo);
-	glDeleteProgram(sr->program);
+	if (sr->color_texture)
+		glDeleteTextures(1, &sr->color_texture);
+	if (sr->texture)
+		glDeleteTextures(1, &sr->texture);
+	if (sr->fbo)
+		glDeleteFramebuffers(1, &sr->fbo);
+	if (sr->program)
+		glDeleteProgram(sr->program);
+	memset(sr, 0, sizeof(*sr));
+}
+
+static bool ensure_shadow_renderer(struct RE_renderer *r)
+{
+	return r->shadow.program || init_shadow_renderer(&r->shadow);
 }
 
 static void init_outline_renderer(struct outline_renderer *or)
@@ -266,7 +301,6 @@ struct RE_renderer *RE_renderer_new(void)
 
 	glGenRenderbuffers(1, &r->depth_buffer);
 
-	init_shadow_renderer(&r->shadow);
 	init_outline_renderer(&r->outline);
 	init_billboard_mesh(r);
 	r->billboard_textures = ht_create(256);
@@ -773,6 +807,8 @@ static void render_shadow_map(struct RE_plugin *plugin, mat4 light_space_transfo
 	}
 
 	struct RE_renderer *r = plugin->renderer;
+	if (!ensure_shadow_renderer(r))
+		return;
 	GLint orig_fbo, orig_viewport[4];
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &orig_fbo);
 	glGetIntegerv(GL_VIEWPORT, orig_viewport);
@@ -1056,6 +1092,9 @@ struct height_detector {
 
 struct height_detector *RE_renderer_create_height_detector(struct RE_renderer *r, struct model *model)
 {
+	if (!ensure_shadow_renderer(r))
+		return NULL;
+
 	struct height_detector *hd = xcalloc(1, sizeof(struct height_detector));
 	vec3 aabb[2];
 	memcpy(aabb, model->aabb, sizeof(aabb));

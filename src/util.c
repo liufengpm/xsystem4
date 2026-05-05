@@ -37,7 +37,9 @@
 
 const char *display_sjis0(const char *sjis)
 {
-#ifdef NATIVE_SJIS
+#if defined(XSYSTEM4_HOST_UTF8)
+	return sjis;
+#elif defined(NATIVE_SJIS)
 	return sjis;
 #else
 	static char *utf = NULL;
@@ -49,7 +51,9 @@ const char *display_sjis0(const char *sjis)
 
 const char *display_sjis1(const char *sjis)
 {
-#ifdef NATIVE_SJIS
+#if defined(XSYSTEM4_HOST_UTF8)
+	return sjis;
+#elif defined(NATIVE_SJIS)
 	return sjis;
 #else
 	static char *utf = NULL;
@@ -61,7 +65,9 @@ const char *display_sjis1(const char *sjis)
 
 const char *display_sjis2(const char *sjis)
 {
-#ifdef NATIVE_SJIS
+#if defined(XSYSTEM4_HOST_UTF8)
+	return sjis;
+#elif defined(NATIVE_SJIS)
 	return sjis;
 #else
 	static char *utf = NULL;
@@ -109,9 +115,9 @@ const char *display_utf2(const char *utf)
 
 char *unix_path(const char *path)
 {
-#ifdef _WIN32
-	/* On Windows, AIN strings are loaded as UTF-8 via ain_open_conv().
-	 * No encoding conversion is needed here; just normalise separators. */
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	/* On UTF-8 host filesystems, AIN strings are already normalized to UTF-8
+	 * via ain_open_conv(). Only separator normalization is needed here. */
 	char *utf = strdup(path);
 #else
 	char *utf = sjis2utf(path, strlen(path));
@@ -167,6 +173,35 @@ char *gamedir_path_icase(const char *path)
 char *savedir_path(const char *path)
 {
 	return resolve_path(config.save_dir, path);
+}
+
+char *xsystem4_data_path(const char *path)
+{
+	const char *env_dir = getenv("XSYSTEM4_DATA_DIR");
+	char *candidate = NULL;
+
+	if (env_dir && *env_dir) {
+		candidate = resolve_path(env_dir, path);
+		if (file_exists(candidate))
+			return candidate;
+		free(candidate);
+	}
+
+	if (config.game_dir && *config.game_dir) {
+		char *game_runtime_dir = resolve_path(config.game_dir, "xsystem4");
+		candidate = resolve_path(game_runtime_dir, path);
+		free(game_runtime_dir);
+		if (file_exists(candidate))
+			return candidate;
+		free(candidate);
+
+		candidate = resolve_path(config.game_dir, path);
+		if (file_exists(candidate))
+			return candidate;
+		free(candidate);
+	}
+
+	return resolve_path(XSYS4_DATA_DIR, path);
 }
 
 void get_date(int *year, int *month, int *mday, int *wday)

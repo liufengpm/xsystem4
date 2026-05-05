@@ -20,6 +20,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+struct string;
+
 enum resume_save_format {
 	SAVE_FORMAT_JSON,
 	SAVE_FORMAT_RSM,
@@ -64,6 +66,11 @@ const char *display_sjis2(const char *sjis);
 const char *display_utf0(const char *utf);
 const char *display_utf1(const char *utf);
 const char *display_utf2(const char *utf);
+struct string *xsystem4_cstring_to_string(const char *text, size_t len);
+char *xsystem4_utf8_to_ain_text(const char *text);
+char *xsystem4_game_text_to_utf8(const char *text);
+char *xsystem4_resource_text_to_utf8(const char *text);
+char *xsystem4_resource_lookup_alias(const char *text);
 
 void indent_message(int indent, const char *fmt, ...);
 
@@ -77,6 +84,7 @@ char *unix_path(const char *path);
 char *gamedir_path(const char *path);
 char *gamedir_path_icase(const char *path);
 char *savedir_path(const char *path);
+char *xsystem4_data_path(const char *path);
 
 void get_date(int *year, int *month, int *mday, int *wday);
 void get_time(int *hour, int *min, int *sec, int *ms);

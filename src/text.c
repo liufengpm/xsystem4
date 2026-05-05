@@ -14,6 +14,13 @@
  * along with this program; if not, see <http://gnu.org/licenses/>.
  */
 
+#include <math.h>
+
+#ifdef __OHOS__
+#include <SDL.h>
+#endif
+
+#include "system4/file.h"
 #include "system4.h"
 #include "system4/fnl.h"
 #include "system4/hashtable.h"
@@ -37,12 +44,95 @@
  *       styles and two different rendering modes (pixel map and alpha map)
  */
 
+#ifdef __OHOS__
+#define DEFAULT_FONT_GOTHIC "fonts/HanaMinA.ttf"
+#else
 #define DEFAULT_FONT_GOTHIC "fonts/VL-Gothic-Regular.ttf"
+#endif
 #define DEFAULT_FONT_MINCHO "fonts/HanaMinA.ttf"
 
 #define MAX_FNL_FONTS 32
 struct font *font_ttf[2] = {0};
 struct font *font_fnl[MAX_FNL_FONTS] = {0};
+
+#ifdef __OHOS__
+static const char * const platform_font_candidates[][8] = {
+	[FONT_GOTHIC] = {
+		"/system/fonts/HarmonyOS_Sans_SC.ttf",
+		"/system/fonts/NotoSansCJK-Regular.ttc",
+		"/system/fonts/HYQiHeiL3.ttf",
+		"/system/fonts/NotoSansCJK.ttc",
+		"/system/fonts/HarmonyOS_Sans.ttf",
+		"/system/fonts/DroidSansFallback.ttf",
+		"/data/fonts/HarmonyOS_Sans_SC.ttf",
+		NULL,
+	},
+	[FONT_MINCHO] = {
+		"/system/fonts/NotoSansCJK-Regular.ttc",
+		"/system/fonts/HYQiHeiL3.ttf",
+		"/system/fonts/HarmonyOS_Sans_SC.ttf",
+		"/system/fonts/NotoSansCJK.ttc",
+		"/system/fonts/HarmonyOS_Sans.ttf",
+		"/system/fonts/DroidSansFallback.ttf",
+		"/data/fonts/HarmonyOS_Sans_SC.ttf",
+		NULL,
+	},
+};
+#elif defined(_WIN32)
+static const char * const platform_font_candidates[][8] = {
+	[FONT_GOTHIC] = {
+		"C:\\Windows\\Fonts\\msyh.ttc",
+		"C:\\Windows\\Fonts\\msyh.ttf",
+		"C:\\Windows\\Fonts\\simhei.ttf",
+		"C:\\Windows\\Fonts\\simsun.ttc",
+		"C:\\Windows\\Fonts\\nsimsun.ttf",
+		NULL,
+	},
+	[FONT_MINCHO] = {
+		"C:\\Windows\\Fonts\\simsun.ttc",
+		"C:\\Windows\\Fonts\\nsimsun.ttf",
+		"C:\\Windows\\Fonts\\msyh.ttc",
+		"C:\\Windows\\Fonts\\msyh.ttf",
+		"C:\\Windows\\Fonts\\simhei.ttf",
+		NULL,
+	},
+};
+#else
+static const char * const platform_font_candidates[][1] = {
+	[FONT_GOTHIC] = { NULL },
+	[FONT_MINCHO] = { NULL },
+};
+#endif
+
+static struct font *try_load_font_path(enum font_face type, const char *path)
+{
+	struct font *font;
+
+	if (!path || !*path)
+		return NULL;
+	if (!file_exists(path))
+		return NULL;
+	font = ft_font_load(path);
+	if (!font)
+		return NULL;
+	NOTICE("Using %s font: %s", type == FONT_GOTHIC ? "gothic" : "mincho", path);
+	#ifdef __OHOS__
+	SDL_Log("[xsystem4_font] using %s font: %s",
+			type == FONT_GOTHIC ? "gothic" : "mincho",
+			path);
+	#endif
+	return font;
+}
+
+static struct font *try_load_platform_font(enum font_face type)
+{
+	for (int i = 0; platform_font_candidates[type][i]; i++) {
+		struct font *font = try_load_font_path(type, platform_font_candidates[type][i]);
+		if (font)
+			return font;
+	}
+	return NULL;
+}
 
 // Controls whether edge widths are taken into account during text layout.
 bool gfx_text_advance_edges = false;
@@ -53,22 +143,36 @@ static struct font *load_font(enum font_face type)
 		[FONT_GOTHIC] = DEFAULT_FONT_GOTHIC,
 		[FONT_MINCHO] = DEFAULT_FONT_MINCHO
 	};
-	static const char *default_font_paths[] = {
-		[FONT_GOTHIC] = XSYS4_DATA_DIR "/" DEFAULT_FONT_GOTHIC,
-		[FONT_MINCHO] = XSYS4_DATA_DIR "/" DEFAULT_FONT_MINCHO
-	};
 
-	struct font *font;
+	struct font *font = NULL;
+	char *default_font_path = xsystem4_data_path(local_font_paths[type]);
+	/* On Harmony, prefer known CJK-capable system fonts before per-game font
+	 * overrides because many Windows-targeted configs point to missing fonts or
+	 * fonts without Simplified Chinese coverage. */
+	#ifdef __OHOS__
+	if ((font = try_load_platform_font(type)))
+		goto done;
+	#endif
 	// user specified font
-	if (config.font_paths[type] && (font = ft_font_load(config.font_paths[type])))
-		return font;
+	if ((font = try_load_font_path(type, config.font_paths[type])))
+		goto done;
+	#ifndef __OHOS__
+	// platform system font
+	if ((font = try_load_platform_font(type)))
+		goto done;
+	#endif
 	// installed default font
-	if ((font = ft_font_load(default_font_paths[type])))
-		return font;
+	if ((font = try_load_font_path(type, default_font_path)))
+		goto done;
 	// local default font
-	if ((font = ft_font_load(local_font_paths[type])))
-		return font;
+	if ((font = try_load_font_path(type, local_font_paths[type])))
+		goto done;
+	free(default_font_path);
 	ERROR("Failed to load %s font", type == FONT_GOTHIC ? "gothic" : "mincho");
+
+done:
+	free(default_font_path);
+	return font;
 }
 
 static bool font_initialized = false;
@@ -109,6 +213,27 @@ static struct font *get_font(unsigned face)
 	return font_ttf[face];
 }
 
+static struct font *get_fallback_font(struct font *font)
+{
+	if (font == font_ttf[FONT_GOTHIC])
+		return font_ttf[FONT_MINCHO];
+	if (font == font_ttf[FONT_MINCHO])
+		return font_ttf[FONT_GOTHIC];
+	return NULL;
+}
+
+static struct font_size *resolve_font_size(struct font_size *size, uint32_t code)
+{
+	if (!size->font->has_glyph || size->font->has_glyph(size->font, code))
+		return size;
+
+	struct font *fallback = get_fallback_font(size->font);
+	if (!fallback || !fallback->has_glyph || !fallback->has_glyph(fallback, code))
+		return size;
+
+	return fallback->get_size(fallback, size->size);
+}
+
 struct font_size *gfx_font_get_size(unsigned face, float size)
 {
 	struct font *font = get_font(face);
@@ -124,32 +249,47 @@ static struct font_size *text_style_font_size(struct text_style *ts)
 
 static struct glyph *font_get_glyph(struct font_size *size, uint32_t code, enum font_weight weight)
 {
-	if (!size->glyph_table)
-		size->glyph_table = ht_create(4096);
+	struct font_size *glyph_size = resolve_font_size(size, code);
+	if (!glyph_size->glyph_table)
+		glyph_size->glyph_table = ht_create(4096);
 	// return cached glyph if available
-	struct ht_slot *slot = ht_put_int(size->glyph_table, code, NULL);
+	struct ht_slot *slot = ht_put_int(glyph_size->glyph_table, code, NULL);
 	if (slot->value && ((struct glyph*)slot->value)->t[weight].handle)
 		return slot->value;
 	// alloc if necessary
 	if (!slot->value)
 		slot->value = xcalloc(1, sizeof(struct glyph));
 	// render glyph
-	if (!size->font->get_glyph(size, slot->value, code, weight))
+	if (!glyph_size->font->get_glyph(glyph_size, slot->value, code, weight))
 		return NULL;
 	return slot->value;
 }
 
 static float font_size_char(struct font_size *size, uint32_t code)
 {
+	size = resolve_font_size(size, code);
 	return size->font->size_char(size, code);
+}
+
+static float font_size_char_kerning(struct font_size *size, uint32_t code,
+		uint32_t code_next)
+{
+	size = resolve_font_size(size, code);
+	return size->font->size_char_kerning(size, code, code_next);
 }
 
 static uint32_t char_to_code(const char *ch, enum charmap charmap)
 {
 	if (charmap == CHARMAP_SJIS)
 		return sjis_code(ch);
+
+	int c;
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	c = (int)vm_char_code(ch);
+#else
 	int c;
 	sjis_char2unicode(ch, &c);
+#endif
 	if (c == '^' && game_rance02_mg)
 		return 0xE9; // é
 	// half-width katakana 'no' (ﾉ)
@@ -167,7 +307,7 @@ float gfx_size_char(struct text_style *ts, const char *ch)
 float gfx_size_char_kerning(struct text_style *ts, uint32_t code, uint32_t code_next)
 {
 	struct font_size *size = text_style_font_size(ts);
-	return size->font->size_char_kerning(size, code, code_next);
+	return font_size_char_kerning(size, code, code_next);
 }
 
 float gfx_size_text(struct text_style *ts, const char *text)
@@ -180,7 +320,7 @@ float gfx_size_text(struct text_style *ts, const char *text)
 	while (*text) {
 		x += font_size_char(size, char_to_code(text, size->font->charmap));
 		x += edge_advance;
-		text = sjis_skip_char(text);
+		text = size->font->charmap == CHARMAP_SJIS ? sjis_skip_char(text) : vm_skip_char(text);
 	}
 	return x;
 }
@@ -207,7 +347,7 @@ float _gfx_render_text(Texture *dst, char *msg, struct text_render_metrics *tm)
 		// get glyph for character
 		float scale_x = *msg == ' ' ? tm->space_scale_x : tm->scale_x;
 		uint32_t code = char_to_code(msg, tm->font_size->font->charmap);
-		msg += SJIS_2BYTE(*msg) ? 2 : 1;
+		msg = tm->font_size->font->charmap == CHARMAP_SJIS ? sjis_skip_char(msg) : vm_skip_char(msg);
 		struct glyph *glyph = font_get_glyph(tm->font_size, code, tm->weight);
 		if (!glyph)
 			continue;

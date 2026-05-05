@@ -22,7 +22,7 @@ uniform float progress;  // effect progress (0..1)
 in vec2 tex_coord;
 out vec4 frag_color;
 
-const float PI = 3.14159265;
+// [OHOS] PI inlined to avoid Maleoon 920 S0015 (const float used in mul expression).
 
 vec3 get_pixel(vec2 xy, float fade) {
         return mix(texture(old, xy).rgb, texture(tex, xy).rgb, fade);
@@ -33,7 +33,7 @@ void main() {
 	// 1 - (x - 1)^2
 	float fade_progress = 1.0 - pow(progress - 1.0, 2.0); // (0..0.5..1) -> (0..1) [parabolic]
 	// sin(PI*x)^4
-	float blur_size = pow(sin(PI * progress), 4.0); // (0..0.5..1) -> (0..1..0) [sine wave ^ 4]
+	float blur_size = pow(sin(3.14159265 * progress), 4.0); // (0..0.5..1) -> (0..1..0) [sine wave ^ 4]
 	float blur_half = (blur_size * resolution.x) / 2.0;
 
         vec3 avg = vec3(0.0);

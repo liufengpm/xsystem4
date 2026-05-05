@@ -7,7 +7,6 @@ version_h = vcs_tag(command : ['git', 'describe', 'HEAD'],
 xsystem4 = [version_h,
             'audio.c',
             'audio_meta.c',
-            'audio_mixer.c',
             'asset_manager.c',
             'base64.c',
             'cJSON.c',
@@ -184,7 +183,21 @@ xsystem4 = [version_h,
             'hll/VSFile.c',
 ]
 
-xsystem4_deps = [libm, zlib, sdl2, ft2, ffi, cglm, sndfile, libsys4_dep] + gl_deps
+xsystem4_deps = [libm, zlib, sdl2, ft2, ffi, cglm, libsys4_dep] + gl_deps
+
+if host_machine.system() == 'windows'
+    cc = meson.get_compiler('c')
+    xsystem4_deps += cc.find_library('psapi')
+    xsystem4_deps += cc.find_library('dbghelp')
+endif
+
+if get_option('audio_backend') == 'ffmpeg'
+    xsystem4 += 'audio_mixer_ffmpeg.c'
+    xsystem4_deps += [avcodec, avformat, avutil, swresample]
+else
+    xsystem4 += 'audio_mixer.c'
+    xsystem4_deps += [sndfile]
+endif
 
 if avcodec.found() and avformat.found() and avutil.found() and swscale.found()
     xsystem4 += 'movie_ffmpeg.c'

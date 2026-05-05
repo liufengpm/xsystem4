@@ -19,7 +19,7 @@ uniform float start_angle;
 uniform float angle;
 uniform vec4 color;
 
-const float PI = 3.14159265358979323846;
+// [OHOS] PI inlined to avoid Maleoon 920 S0015 (const float used in mul expression).
 
 in vec2 tex_coord;
 out vec4 frag_color;
@@ -27,7 +27,7 @@ out vec4 frag_color;
 void main() {
 	vec2 p = tex_coord - center;
 	float a = atan(p.y, p.x);
-	a = mod(a - start_angle, 2.0 * PI);
+	a = mod(a - start_angle, 6.28318531); // 2*PI
 	if (a > angle)
 		discard;
 	frag_color = color;

@@ -18,6 +18,7 @@
 #include <SDL.h>
 #include "gfx/gl.h"
 #include <cglm/cglm.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
@@ -27,6 +28,7 @@
 #include "system4/file.h"
 #include "system4/utfsjis.h"
 
+#include "audio.h"
 #include "gfx/gfx.h"
 #include "gfx/private.h"
 #include "icon.h"
@@ -65,6 +67,12 @@ static mat4 world_view_transform = MAT4(
 static struct shader default_shader;
 
 static GLuint main_surface_fb;
+/* Persistent scratch FBOs reused across gfx_set/reset_framebuffer calls.
+ * On BiSheng/Maleoon GPUs, creating and deleting an FBO per draw operation
+ * triggers UAF crashes because GPU work runs on a background thread.
+ * Using persistent FBOs eliminates the entire create/delete cycle. */
+static GLuint scratch_draw_fbo;
+static GLuint scratch_read_fbo;
 static struct texture main_surface;
 static struct texture *view = &main_surface;
 static GLint max_texture_size;
@@ -72,31 +80,109 @@ static SDL_Color clear_color = { 0, 0, 0, 255 };
 static float frame_rate;
 static bool wait_vsync = false;
 
+#ifdef USE_GLES
+#define COLOR_RENDER_TARGET_INTERNAL_FORMAT GL_RGBA8
+#else
+#define COLOR_RENDER_TARGET_INTERNAL_FORMAT GL_RGBA
+#endif
+
+static const char *framebuffer_status_name(GLenum status)
+{
+	switch (status) {
+	case GL_FRAMEBUFFER_COMPLETE:
+		return "GL_FRAMEBUFFER_COMPLETE";
+	case GL_FRAMEBUFFER_UNDEFINED:
+		return "GL_FRAMEBUFFER_UNDEFINED";
+	case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT:
+		return "GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT";
+	case GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT:
+		return "GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT";
+	case GL_FRAMEBUFFER_UNSUPPORTED:
+		return "GL_FRAMEBUFFER_UNSUPPORTED";
+	case GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE:
+		return "GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE";
+	default:
+		return "GL_FRAMEBUFFER_STATUS_UNKNOWN";
+	}
+}
+
+static void alloc_color_render_target(int w, int h)
+{
+	glTexImage2D(GL_TEXTURE_2D, 0, COLOR_RENDER_TARGET_INTERNAL_FORMAT, w, h, 0,
+			 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+}
+
 static GLchar *read_shader_file(const char *path)
 {
 	GLchar *source = SDL_LoadFile(path, NULL);
 	if (!source) {
-		char full_path[PATH_MAX];
-		snprintf(full_path, PATH_MAX, XSYS4_DATA_DIR "/%s", path);
+		char *full_path = xsystem4_data_path(path);
 		source = SDL_LoadFile(full_path, NULL);
 		if (!source)
 			ERROR("Failed to load shader file %s", full_path, strerror(errno));
+		free(full_path);
 	}
 	return source;
+}
+
+static void release_shader_source(GLchar *source)
+{
+#ifdef __OHOS__
+	/* Some Harmony GPU drivers keep compiling on background threads even after
+	 * glCompileShader/glLinkProgram return. Keep source buffers alive for the
+	 * process lifetime to avoid vendor compiler UAF crashes.
+	 */
+	(void)source;
+#else
+	SDL_free(source);
+#endif
+}
+
+static void sync_shader_compiler(void)
+{
+#ifdef __OHOS__
+	/* Force vendor drivers to complete deferred compiler work before moving on
+	 * to the next shader stage or releasing intermediate objects.
+	 */
+	glFinish();
+#endif
 }
 
 GLuint gfx_load_shader_file(const char *path, GLenum type, const char *defines)
 {
 	GLint shader_compiled;
 	GLuint shader;
-	const GLchar *source[3] = {
+	GLchar *file_source = read_shader_file(path);
+#ifdef __OHOS__
+	/* Huawei BiSheng GPU compiler (Mate 80 / Kirin X90) crashes in a background
+	 * thread when glShaderSource is given multiple source-string arrays: the
+	 * driver's internal "version" string parser dereferences a NULL pointer when
+	 * iterating over fragmented source chunks.  Work around it by concatenating
+	 * all pieces into one allocation before calling glShaderSource.
+	 */
+	const char *defines_str = defines ? defines : "";
+	size_t preamble_len = strlen(glsl_preamble);
+	size_t defines_len  = strlen(defines_str);
+	size_t file_len     = strlen(file_source);
+	GLchar *merged = xmalloc(preamble_len + defines_len + file_len + 1);
+	memcpy(merged, glsl_preamble, preamble_len);
+	memcpy(merged + preamble_len, defines_str, defines_len);
+	memcpy(merged + preamble_len + defines_len, file_source, file_len + 1);
+	release_shader_source(file_source);
+	const GLchar *source = merged;
+	shader = glCreateShader(type);
+	glShaderSource(shader, 1, &source, NULL);
+#else
+	const GLchar *sources[3] = {
 		glsl_preamble,
 		defines ? defines : "",
-		read_shader_file(path)
+		file_source
 	};
 	shader = glCreateShader(type);
-	glShaderSource(shader, 3, source, NULL);
+	glShaderSource(shader, 3, sources, NULL);
+#endif
 	glCompileShader(shader);
+	sync_shader_compiler();
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &shader_compiled);
 	if (!shader_compiled) {
 		GLint len;
@@ -105,7 +191,11 @@ GLuint gfx_load_shader_file(const char *path, GLenum type, const char *defines)
 		glGetShaderInfoLog(shader, len, NULL, infolog);
 		ERROR("Failed to compile shader %s: %s", path, infolog);
 	}
-	SDL_free((char*)source[2]);
+#ifdef __OHOS__
+	release_shader_source(merged);
+#else
+	release_shader_source(file_source);
+#endif
 	return shader;
 }
 
@@ -118,11 +208,17 @@ void gfx_load_shader(struct shader *dst, const char *vertex_shader_path, const c
 	glAttachShader(program, vertex_shader);
 	glAttachShader(program, fragment_shader);
 	glLinkProgram(program);
+	sync_shader_compiler();
 
 	GLint link_success;
 	glGetProgramiv(program, GL_LINK_STATUS, &link_success);
 	if (!link_success)
 		ERROR("Failed to link shader: %s, %s", vertex_shader_path, fragment_shader_path);
+
+	glDetachShader(program, vertex_shader);
+	glDetachShader(program, fragment_shader);
+	glDeleteShader(vertex_shader);
+	glDeleteShader(fragment_shader);
 
 	dst->program = program;
 	dst->world_transform = glGetUniformLocation(program, "world_transform");
@@ -136,7 +232,9 @@ void gfx_load_shader(struct shader *dst, const char *vertex_shader_path, const c
 static int gl_initialize(void)
 {
 	gfx_load_shader(&default_shader, "shaders/render.v.glsl", "shaders/render.f.glsl");
-
+	NOTICE("xsystem4 GL vendor: %s", (const char *)glGetString(GL_VENDOR));
+	NOTICE("xsystem4 GL renderer: %s", (const char *)glGetString(GL_RENDERER));
+	NOTICE("xsystem4 GL version: %s", (const char *)glGetString(GL_VERSION));
 	const struct gfx_vertex vertex_data[] = {
 		//  x,   y,   z,   w,   u,   v
 		{ 0.f, 0.f, 0.f, 1.f, 0.f, 0.f },
@@ -171,7 +269,14 @@ static int gl_initialize(void)
 
 	glBindVertexArray(0);
 
+	glGenFramebuffers(1, &scratch_draw_fbo);
+	glGenFramebuffers(1, &scratch_read_fbo);
+
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
+	if (max_texture_size <= 0) {
+		WARNING("GL_MAX_TEXTURE_SIZE reported %d, falling back to 4096", max_texture_size);
+		max_texture_size = 4096;
+	}
 
 	return 0;
 }
@@ -221,10 +326,25 @@ static void init_window_size(void)
 #endif
 }
 
+static int get_portrait_top_offset_pct(void)
+{
+	const char *env = getenv("TAPIR_PORTRAIT_TOP_OFFSET");
+	int pct = env ? atoi(env) : 0;
+	if (pct < 0)
+		return 0;
+	if (pct > 100)
+		return 100;
+	return pct;
+}
+
 int gfx_init(void)
 {
 	if (gfx_initialized)
 		return true;
+
+#if defined(USE_GLES) && defined(_WIN32)
+	SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
+#endif
 
 	uint32_t flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO;
 	if (config.joypad)
@@ -232,31 +352,79 @@ int gfx_init(void)
 	if (SDL_Init(flags) < 0)
 		ERROR("SDL_Init failed: %s", SDL_GetError());
 
+#ifdef __OHOS__
+	/* The Harmony backend feeds SDL touch events directly. xsystem4 input
+	 * semantics are still built around mouse buttons, so enable SDL's
+	 * touch-to-mouse synthesis explicitly like the other Harmony engines.
+	 */
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "1");
+	SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+#endif
+
 #ifdef USE_GLES
+	NOTICE("xsystem4 renderer backend: OpenGL ES 3.x");
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 #else
+	NOTICE("xsystem4 renderer backend: OpenGL 3.1 core");
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
 
 	sdl.format = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA32);
+	int window_w = config.view_width;
+	int window_h = config.view_height;
+#ifdef __OHOS__
+	/* Reuse the fullscreen root XComponent on Harmony instead of creating
+	 * a fixed-size child surface at the game's logical resolution.
+	 */
+	window_w = 1;
+	window_h = 1;
+#endif
 	sdl.window =  SDL_CreateWindow("XSystem4",
 				       SDL_WINDOWPOS_UNDEFINED,
 				       SDL_WINDOWPOS_UNDEFINED,
-				       config.view_width,
-				       config.view_height,
+				       window_w,
+				       window_h,
 				       SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 	if (!sdl.window)
 		ERROR("SDL_CreateWindow failed: %s", SDL_GetError());
 
 	set_window_title();
 
+#ifdef __OHOS__
+	/* SDL_CreateWindow already waits for a native surface, but the root
+	 * XComponent can still publish its final size immediately afterwards.
+	 * Mirror the extra surface-ready sync used by the stable Harmony engines
+	 * before creating the GL context and starting xsystem4's heavy GL init.
+	 */
+	{
+		extern void OHOS_WaitForSurfaceReady(int timeout_ms);
+		SDL_Event ev;
+		int window_w = 0;
+		int window_h = 0;
+		OHOS_WaitForSurfaceReady(2000);
+		SDL_PumpEvents();
+		while (SDL_PeepEvents(&ev, 1, SDL_GETEVENT, SDL_WINDOWEVENT, SDL_WINDOWEVENT) > 0) {
+			if (ev.window.event == SDL_WINDOWEVENT_RESIZED ||
+			    ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+				window_w = ev.window.data1;
+				window_h = ev.window.data2;
+			}
+		}
+		SDL_GetWindowSize(sdl.window, &window_w, &window_h);
+		NOTICE("xsystem4 OHOS window size before GL context: %dx%d", window_w, window_h);
+	}
+#endif
+
 	sdl.gl.context = SDL_GL_CreateContext(sdl.window);
 	if (!sdl.gl.context)
 		ERROR("SDL_GL_CreateContext failed: %s", SDL_GetError());
+	if (SDL_GL_MakeCurrent(sdl.window, sdl.gl.context) < 0)
+		ERROR("SDL_GL_MakeCurrent failed: %s", SDL_GetError());
+	SDL_Log("[xsystem4] gfx_init: GL context ready");
 
 #ifndef USE_GLES
 	glewExperimental = GL_TRUE;
@@ -267,19 +435,61 @@ int gfx_init(void)
 
 	SDL_GL_SetSwapInterval(wait_vsync ? 1 : 0);
 	gl_initialize();
+	SDL_Log("[xsystem4] gfx_init: gl_initialize OK (vendor=%s renderer=%s)",
+		(const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER));
 	gfx_draw_init();
+	SDL_Log("[xsystem4] gfx_init: gfx_draw_init OK");
+	/* Pre-warm shaders from non-draw.c modules before the first frame.
+	 * This avoids late shader compilation that can crash certain GPU compilers
+	 * (e.g. BiSheng on HiSilicon Kirin) and improves first-frame latency on
+	 * all GLES backends.  sprite_prewarm_shaders() uses a "steal" mechanism
+	 * so sprite_init_sact/chipmunk never recompile at game time.  The remaining
+	 * module shaders are compiled into static holders that stay alive; drivers
+	 * with program caching will reuse them when the real init calls happen. */
+	{
+		extern void sprite_prewarm_shaders(void);
+		sprite_prewarm_shaders();
+		/* Pre-warm all 14 TRANS effect shaders.  They are normally lazy-loaded
+		 * by effect_init() at scene-transition time; on BiSheng (Maleoon GPU)
+		 * that late glLinkProgram call crashes the compiler thread. */
+		extern void effect_prewarm_shaders(void);
+		effect_prewarm_shaders();
+
+		/* Module shaders compiled here + kept alive to populate driver cache.
+		 * NOTE: reign/reign_outline/reign_shadow are excluded because they
+		 * require ENGINE/REIGN_ENGINE/TAPIR_ENGINE defines that are only
+		 * known at 3d/renderer.c init time. */
+		static Shader module_prewarmed[6];
+		static const struct { const char *v; const char *f; } pairs[] = {
+			{ "shaders/render.v.glsl",         "shaders/movie.f.glsl"          },
+			{ "shaders/render.v.glsl",         "shaders/fill_angle.f.glsl"     },
+			{ "shaders/parts.v.glsl",          "shaders/parts.f.glsl"          },
+			{ "shaders/dungeon.v.glsl",        "shaders/dungeon.f.glsl"        },
+			{ "shaders/render.v.glsl",         "shaders/dungeon_raster.f.glsl" },
+			{ "shaders/dungeon_skybox.v.glsl", "shaders/dungeon_skybox.f.glsl" },
+		};
+		for (int i = 0; i < (int)(sizeof(pairs)/sizeof(pairs[0])); i++)
+			gfx_load_shader(&module_prewarmed[i], pairs[i].v, pairs[i].f);
+	}
+	SDL_Log("[xsystem4] gfx_init: shader pre-warm complete");
 	gfx_set_window_logical_size(config.view_width, config.view_height);
 	init_window_size();
 	atexit(gfx_fini);
 	gfx_clear();
 	icon_init();
 	gfx_initialized = true;
+	SDL_Log("[xsystem4] gfx_init: complete (%dx%d logical)", sdl.w, sdl.h);
 	return 0;
 }
 
 void gfx_fini(void)
 {
+	audio_shutdown();
 	glDeleteProgram(default_shader.program);
+	if (scratch_draw_fbo)
+		glDeleteFramebuffers(1, &scratch_draw_fbo);
+	if (scratch_read_fbo)
+		glDeleteFramebuffers(1, &scratch_read_fbo);
 	SDL_DestroyWindow(sdl.window);
 	SDL_FreeFormat(sdl.format);
 	SDL_Quit();
@@ -293,12 +503,18 @@ Texture *gfx_main_surface(void)
 static void main_surface_init(int w, int h)
 {
 	gfx_delete_texture(&main_surface);
+	if (main_surface_fb)
+		glDeleteFramebuffers(1, &main_surface_fb);
 
 	glGenTextures(1, &main_surface.handle);
 	glBindTexture(GL_TEXTURE_2D, main_surface.handle);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+	/* GLES/ANGLE is stricter about FBO color attachments than desktop GL.
+	 * Store render targets as RGBA so they remain framebuffer-complete. */
+	alloc_color_render_target(w, h);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	main_surface.w = w;
@@ -307,6 +523,10 @@ static void main_surface_init(int w, int h)
 	glGenFramebuffers(1, &main_surface_fb);
 	glBindFramebuffer(GL_FRAMEBUFFER, main_surface_fb);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, main_surface.handle, 0);
+	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (status != GL_FRAMEBUFFER_COMPLETE)
+		ERROR("Main surface framebuffer incomplete: status=%s(0x%04x) size=%dx%d tex=%u err=0x%04x",
+			framebuffer_status_name(status), status, w, h, main_surface.handle, glGetError());
 }
 
 void gfx_set_window_logical_size(int w, int h)
@@ -360,7 +580,13 @@ void gfx_update_screen_scale(void)
 		sdl.viewport.w = display_w;
 		sdl.viewport.h = sdl.h * display_w / sdl.w;
 		sdl.viewport.x = 0;
-		sdl.viewport.y = (display_h - sdl.viewport.h) / 2;
+		int remaining_y = display_h - sdl.viewport.h;
+#ifdef __OHOS__
+		if (remaining_y > 0 && display_h > display_w)
+			sdl.viewport.y = remaining_y * get_portrait_top_offset_pct() / 100;
+		else
+#endif
+			sdl.viewport.y = remaining_y / 2;
 	} else {
 		// pillarbox (side bars)
 		sdl.viewport.w = sdl.w * display_h / sdl.h;
@@ -423,9 +649,17 @@ static void gfx_update_frame_rate_counter(void)
 
 void gfx_swap(void)
 {
+	gfx_update_screen_scale();
+	int display_w, display_h;
+	SDL_GL_GetDrawableSize(sdl.window, &display_w, &display_h);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(sdl.viewport.x, sdl.viewport.y, sdl.viewport.w, sdl.viewport.h);
+	glViewport(sdl.viewport.x, display_h - sdl.viewport.y - sdl.viewport.h, sdl.viewport.w, sdl.viewport.h);
 	gfx_clear();
+	/* Present the composed scene as an opaque image. ANGLE/DWM can honor the
+	 * default framebuffer alpha, which makes the whole game window appear washed
+	 * out if we carry per-pixel sprite alpha into the final swapchain image.
+	 */
+	glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
 
 	static mat4 wv_transform = MAT4(
 		2,  0, 0, -1,
@@ -441,6 +675,7 @@ void gfx_swap(void)
 		.data = view
 	};
 	gfx_render(&job);
+	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
 
 	SDL_GL_SwapWindow(sdl.window);
 	glBindFramebuffer(GL_FRAMEBUFFER, main_surface_fb);
@@ -636,11 +871,11 @@ void gfx_init_texture_rgb(struct texture *t, int w, int h, SDL_Color color)
 		h = max_texture_size;
 	}
 	init_texture(t, w, h);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+	alloc_color_render_target(w, h);
 	if (w <= 0 || h <= 0)
 		return;
 	GLuint fbo = gfx_set_framebuffer(GL_DRAW_FRAMEBUFFER, t, 0, 0, w, h);
-	glClearColor(color.r / 255.f, color.g / 255.f, color.b / 255.f, 255.f);
+	glClearColor(color.r / 255.f, color.g / 255.f, color.b / 255.f, 1.f);
 	glClear(GL_COLOR_BUFFER_BIT);
 	gfx_reset_framebuffer(GL_DRAW_FRAMEBUFFER, fbo);
 }
@@ -671,7 +906,16 @@ void gfx_init_texture_blank(struct texture *t, int w, int h)
 void gfx_copy_main_surface(struct texture *dst)
 {
 	init_texture(dst, main_surface.w, main_surface.h);
-	glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 0, 0, main_surface.w, main_surface.h, 0);
+	alloc_color_render_target(main_surface.w, main_surface.h);
+	#ifdef __OHOS__
+	/* Harmony's Maleoon/BiSheng stack is unstable when effect_init snapshots the
+	 * current main FBO via glCopyTexSubImage2D. Render-copy the main surface
+	 * into the destination texture instead so transitions avoid the driver path
+	 * that crashes in libbishenggpucompiler/libmaleoon. */
+	gfx_copy_with_alpha_map(dst, 0, 0, &main_surface, 0, 0, main_surface.w, main_surface.h);
+	#else
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, main_surface.w, main_surface.h);
+	#endif
 }
 
 void gfx_delete_texture(struct texture *t)
@@ -683,8 +927,7 @@ void gfx_delete_texture(struct texture *t)
 
 GLuint gfx_set_framebuffer(GLenum target, Texture *t, int x, int y, int w, int h)
 {
-	GLuint fbo;
-	glGenFramebuffers(1, &fbo);
+	GLuint fbo = (target == GL_READ_FRAMEBUFFER) ? scratch_read_fbo : scratch_draw_fbo;
 	glBindFramebuffer(target, fbo);
 	glFramebufferTexture2D(target, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->handle, 0);
 	glViewport(x, y, w, h);
@@ -696,9 +939,16 @@ GLuint gfx_set_framebuffer(GLenum target, Texture *t, int x, int y, int w, int h
 
 void gfx_reset_framebuffer(GLenum target, GLuint fbo)
 {
+	/* Detach the texture so the persistent scratch FBO keeps no stale
+	 * references to textures that may be freed between calls. */
+	glFramebufferTexture2D(target, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
 	glBindFramebuffer(target, main_surface_fb);
-	glDeleteFramebuffers(1, &fbo);
+	/* The scratch FBO is persistent — glDelete is never called on it.
+	 * This eliminates the BiSheng/Maleoon GPU UAF crash that occurred when
+	 * glDeleteFramebuffers was called before the driver's background thread
+	 * finished processing the FBO's deferred render commands. */
 	glViewport(0, 0, sdl.w, sdl.h);
+	(void)fbo;
 }
 
 SDL_Color gfx_get_pixel(Texture *t, int x, int y)

@@ -19,7 +19,7 @@ uniform sampler2D tex;
 uniform float amp;
 uniform float t;
 
-const float PI = 3.14159265;
+// [OHOS] PI inlined to avoid Maleoon 920 S0015 (const float used in mul expression).
 
 in vec2 tex_coord;
 out vec4 frag_color;
@@ -29,11 +29,11 @@ vec4 sample_texture(float offset_x) {
 }
 
 void main() {
-	float a = amp * cos((tex_coord.y + fract(t / 8.0)) * 16.0 * PI);
+	float a = amp * cos((tex_coord.y + fract(t / 8.0)) * 50.26548); // 16*PI
 	float p1 = 6.0 * tex_coord.y + 1.5;
 	float p2 = 4.0 * tex_coord.y + 2.0;
-	float offset1 = cos(p1 * 2.0 * PI) * a;
-	float offset2 = cos(p2 * 2.0 * PI) * a;
+	float offset1 = cos(p1 * 6.28318530) * a; // 2*PI
+	float offset2 = cos(p2 * 6.28318530) * a; // 2*PI
 
 	frag_color = mix(sample_texture(offset1), sample_texture(offset2), 0.5);
 }

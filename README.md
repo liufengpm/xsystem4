@@ -19,12 +19,13 @@ First install the dependencies (corresponding Debian package in parentheses):
 * bison (bison)
 * cglm (libcglm-dev) [optional, fetched by meson if not available]
 * flex (flex)
+* FFmpeg (libavcodec-dev, libavformat-dev, libavutil-dev, libswresample-dev, libswscale-dev) [optional, required for FFmpeg movie playback and `-Daudio_backend=ffmpeg`]
 * freetype (libfreetype-dev)
-* glew (libglew-dev)
+* glew (libglew-dev) [desktop OpenGL path only]
 * meson (meson)
 * libffi (libffi-dev)
 * libpng (libpng-dev)
-* libsndfile (libsndfile-dev)
+* libsndfile (libsndfile-dev) [sndfile audio backend only]
 * libturbojpeg (libturbojpeg0-dev)
 * libwebp (libwebp-dev)
 * SDL2 (libsdl2-dev)
@@ -61,12 +62,16 @@ First install MSYS2, and then open the MINGW64 shell and run the following comma
         mingw-w64-x86_64-freetype \
         mingw-w64-x86_64-libjpeg-turbo \
         mingw-w64-x86_64-libwebp \
-        mingw-w64-x86_64-libsndfile \
-        mingw-w64-x86_64-glew \
+        mingw-w64-x86_64-angleproject \
         mingw-w64-x86_64-nasm \
         mingw-w64-x86_64-diffutils
 
-To build with FFmpeg support, you must compile FFmpeg as a static library:
+The recommended Windows validation lane matches the Harmony runtime profile:
+
+* OpenGL ES via ANGLE (`-Dopengles=enabled`)
+* FFmpeg audio mixer (`-Daudio_backend=ffmpeg`)
+
+To build with FFmpeg support, compile FFmpeg as a static library:
 
     git clone https://github.com/FFmpeg/FFmpeg.git
     cd FFmpeg
@@ -103,10 +108,13 @@ To build with FFmpeg support, you must compile FFmpeg as a static library:
 Then build the xsystem4 executable with meson,
 
     mkdir build
-    meson build
+    meson setup build -Dopengles=enabled -Daudio_backend=ffmpeg
     ninja -C build
 
-To create a portable executable, it is neccessary to copy some DLLs into the same directory as xsystem4.exe.
+To create a portable executable, copy the runtime DLLs reported by `ldd` into the same
+directory as xsystem4.exe. This picks up ANGLE's `libEGL.dll` / `libGLESv2.dll`
+chain without hardcoding a package-specific list.
+
 You can determine the required DLLs with the following command,
 
     ldd build/src/xsystem4.exe | grep mingw64

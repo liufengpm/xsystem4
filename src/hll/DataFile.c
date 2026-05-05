@@ -170,8 +170,9 @@ static struct gdat *gdat_read(struct buffer *r)
 		dat->nr_strings = buffer_read_int32(r);
 		dat->strings = xcalloc(dat->nr_strings, sizeof(struct string*));
 		for (uint32_t i = 0; i < dat->nr_strings; i++) {
-			dat->strings[i] = cstr_to_string(buffer_strdata(r));
-			buffer_skip(r, dat->strings[i]->size + 1);
+			size_t raw_len = strlen(buffer_strdata(r));
+			dat->strings[i] = xsystem4_cstring_to_string(buffer_strdata(r), raw_len);
+			buffer_skip(r, raw_len + 1);
 		}
 	}
 

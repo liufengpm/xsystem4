@@ -38,9 +38,50 @@ static struct texture *DTEX(int sp_no)
 	return sprite_get_texture(sp);
 }
 
+static int drawgraph_alpha_promote_notice_count;
+
+static struct texture *DTEX_ALPHA(int sp_no)
+{
+	struct sact_sprite *sp = sact_get_sprite(sp_no);
+	Texture old_texture;
+	if (!sp) return NULL;
+	sprite_dirty(sp);
+	if (sp->sp.has_alpha)
+		return sprite_get_texture(sp);
+	if (drawgraph_alpha_promote_notice_count < 8) {
+		NOTICE("DrawGraph alpha-target promote[%d]: dst=%d had_texture=%d size=%dx%d",
+				drawgraph_alpha_promote_notice_count, sp_no, sp->texture.handle ? 1 : 0,
+				sp->rect.w, sp->rect.h);
+		drawgraph_alpha_promote_notice_count++;
+	}
+	if (!sp->texture.handle) {
+		sp->sp.has_alpha = true;
+		return sprite_get_texture(sp);
+	}
+	old_texture = sp->texture;
+	sp->texture = (Texture){0};
+	sp->sp.has_alpha = true;
+	gfx_init_texture_rgba(&sp->texture, old_texture.w, old_texture.h, (SDL_Color){0, 0, 0, 255});
+	gfx_copy(&sp->texture, 0, 0, &old_texture, 0, 0, old_texture.w, old_texture.h);
+	gfx_delete_texture(&old_texture);
+	return &sp->texture;
+}
+
+static int drawgraph_copy_notice_count;
+static int drawgraph_copy_amap_notice_count;
+static int drawgraph_copy_with_alpha_notice_count;
+static int drawgraph_fill_amap_notice_count;
+
 static void DrawGraph_Copy(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	struct texture *dst_tex = DTEX(dst);
+	struct texture *src_tex = STEX(src);
+	if (drawgraph_copy_notice_count < 8) {
+		NOTICE("DrawGraph.Copy[%d]: dst=%d src=%d dx=%d dy=%d sx=%d sy=%d w=%d h=%d",
+				drawgraph_copy_notice_count, dst, src, dx, dy, sx, sy, w, h);
+		drawgraph_copy_notice_count++;
+	}
+	gfx_copy(dst_tex, dx, dy, src_tex, sx, sy, w, h);
 }
 
 static void DrawGraph_CopyBright(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int rate)
@@ -50,7 +91,14 @@ static void DrawGraph_CopyBright(int dst, int dx, int dy, int src, int sx, int s
 
 static void DrawGraph_CopyAMap(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy_amap(STEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	struct texture *dst_tex = DTEX_ALPHA(dst);
+	struct texture *src_tex = STEX(src);
+	if (drawgraph_copy_amap_notice_count < 8) {
+		NOTICE("DrawGraph.CopyAMap[%d]: dst=%d src=%d dx=%d dy=%d sx=%d sy=%d w=%d h=%d",
+				drawgraph_copy_amap_notice_count, dst, src, dx, dy, sx, sy, w, h);
+		drawgraph_copy_amap_notice_count++;
+	}
+	gfx_copy_amap(dst_tex, dx, dy, src_tex, sx, sy, w, h);
 }
 
 static void DrawGraph_CopySprite(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int r, int g, int b)
@@ -75,12 +123,12 @@ static void DrawGraph_CopyUseAMapBorder(int dst, int dx, int dy, int src, int sx
 
 static void DrawGraph_CopyAMapMax(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy_amap_max(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	gfx_copy_amap_max(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h);
 }
 
 static void DrawGraph_CopyAMapMin(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy_amap_min(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	gfx_copy_amap_min(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h);
 }
 
 static void DrawGraph_Blend(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int alpha)
@@ -100,42 +148,42 @@ static void DrawGraph_BlendAddSatur(int dst, int dx, int dy, int src, int sx, in
 
 static void DrawGraph_BlendAMap(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_blend_amap(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	gfx_blend_amap(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h);
 }
 
 static void DrawGraph_BlendAMapSrcOnly(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_blend_amap_src_only(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	gfx_blend_amap_src_only(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h);
 }
 
 static void DrawGraph_BlendAMapColor(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int r, int g, int b)
 {
-	gfx_blend_amap_color(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, r, g, b);
+	gfx_blend_amap_color(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, r, g, b);
 }
 
 static void DrawGraph_BlendAMapColorAlpha(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int r, int g, int b, int a)
 {
-	gfx_blend_amap_color_alpha(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, r, g, b, a);
+	gfx_blend_amap_color_alpha(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, r, g, b, a);
 }
 
 static void DrawGraph_BlendAMapAlpha(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int alpha)
 {
-	gfx_blend_amap_alpha(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, alpha);
+	gfx_blend_amap_alpha(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, alpha);
 }
 
 static void DrawGraph_BlendAMapBright(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int rate)
 {
-	gfx_blend_amap_bright(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, rate);
+	gfx_blend_amap_bright(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, rate);
 }
 
 static void DrawGraph_BlendAMapAlphaSrcBright(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int alpha, int rate)
 {
-	gfx_blend_amap_alpha_src_bright(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, alpha, rate);
+	gfx_blend_amap_alpha_src_bright(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, alpha, rate);
 }
 
 static void DrawGraph_BlendUseAMapColor(int dst, int dx, int dy, int alpha, int ax, int ay, int w, int h, int r, int g, int b, int rate)
 {
-	gfx_blend_use_amap_color(DTEX(dst), dx, dy, STEX(alpha), ax, ay, w, h, r, g, b, rate);
+	gfx_blend_use_amap_color(DTEX_ALPHA(dst), dx, dy, STEX(alpha), ax, ay, w, h, r, g, b, rate);
 }
 
 static void DrawGraph_BlendScreen(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
@@ -160,12 +208,17 @@ static void DrawGraph_Fill(int dst, int x, int y, int w, int h, int r, int g, in
 
 static void DrawGraph_FillAlphaColor(int dst, int x, int y, int w, int h, int r, int g, int b, int rate)
 {
-	gfx_fill_alpha_color(DTEX(dst), x, y, w, h, r, g, b, rate);
+	gfx_fill_alpha_color(DTEX_ALPHA(dst), x, y, w, h, r, g, b, rate);
 }
 
 static void DrawGraph_FillAMap(int dst, int x, int y, int w, int h, int alpha)
 {
-	gfx_fill_amap(DTEX(dst), x, y, w, h, alpha);
+	if (drawgraph_fill_amap_notice_count < 8) {
+		NOTICE("DrawGraph.FillAMap[%d]: dst=%d x=%d y=%d w=%d h=%d alpha=%d",
+				drawgraph_fill_amap_notice_count, dst, x, y, w, h, alpha);
+		drawgraph_fill_amap_notice_count++;
+	}
+	gfx_fill_amap(DTEX_ALPHA(dst), x, y, w, h, alpha);
 	if (game_rance7_mg) {
 		// Short-term fix for https://github.com/nunuhara/xsystem4/issues/237
 		sprite_text_clear(sact_get_sprite(dst));
@@ -174,17 +227,17 @@ static void DrawGraph_FillAMap(int dst, int x, int y, int w, int h, int alpha)
 
 static void DrawGraph_FillAMapOverBorder(int dst, int x, int y, int w, int h, int alpha, int border)
 {
-	gfx_fill_amap_over_border(DTEX(dst), x, y, w, h, alpha, border);
+	gfx_fill_amap_over_border(DTEX_ALPHA(dst), x, y, w, h, alpha, border);
 }
 
 static void DrawGraph_FillAMapUnderBorder(int dst, int x, int y, int w, int h, int alpha, int border)
 {
-	gfx_fill_amap_under_border(DTEX(dst), x, y, w, h, alpha, border);
+	gfx_fill_amap_under_border(DTEX_ALPHA(dst), x, y, w, h, alpha, border);
 }
 
 static void DrawGraph_FillAMapGradationUD(int dst, int x, int y, int w, int h, int up_a, int down_a)
 {
-	gfx_fill_amap_gradation_ud(DTEX(dst), x, y, w, h, up_a, down_a);
+	gfx_fill_amap_gradation_ud(DTEX_ALPHA(dst), x, y, w, h, up_a, down_a);
 }
 
 static void DrawGraph_FillScreen(int dst, int x, int y, int w, int h, int r, int g, int b)
@@ -214,7 +267,7 @@ static void DrawGraph_AddDA_DAxSA(int dst, int dx, int dy, int src, int sx, int 
 
 static void DrawGraph_SpriteCopyAMap(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int key)
 {
-	gfx_sprite_copy_amap(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, key);
+	gfx_sprite_copy_amap(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, key);
 }
 
 static void DrawGraph_BlendDA_DAxSA(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
@@ -247,12 +300,12 @@ static void DrawGraph_CopyStretchBlend(int dst, int dx, int dy, int dw, int dh, 
 
 static void DrawGraph_CopyStretchBlendAMap(int dst, int dx, int dy, int dw, int dh, int src, int sx, int sy, int sw, int sh)
 {
-	gfx_copy_stretch_blend_amap(DTEX(dst), dx, dy, dw, dh, STEX(src), sx, sy, sw, sh);
+	gfx_copy_stretch_blend_amap(DTEX_ALPHA(dst), dx, dy, dw, dh, STEX(src), sx, sy, sw, sh);
 }
 
 static void DrawGraph_CopyStretchAMap(int dst, int dx, int dy, int dw, int dh, int src, int sx, int sy, int sw, int sh)
 {
-	gfx_copy_stretch_amap(DTEX(dst), dx, dy, dw, dh, STEX(src), sx, sy, sw, sh);
+	gfx_copy_stretch_amap(DTEX_ALPHA(dst), dx, dy, dw, dh, STEX(src), sx, sy, sw, sh);
 }
 
 //void DrawGraph_CopyStretchInterp(int dst, int dx, int dy, int dw, int dh, int src, int sx, int sy, int sw, int sh);
@@ -265,7 +318,7 @@ static void DrawGraph_DrawTextToPMap(int dst, int x, int y, struct string *s)
 
 static void DrawGraph_DrawTextToAMap(int dst, int x, int y, struct string *s)
 {
-	gfx_draw_text_to_amap(DTEX(dst), x, y, s->text);
+	gfx_draw_text_to_amap(DTEX_ALPHA(dst), x, y, s->text);
 }
 
 static void DrawGraph_SetFontSize(int size)
@@ -320,12 +373,12 @@ static void DrawGraph_CopyRotZoom(int dst, int src, int sx, int sy, int w, int h
 
 static void DrawGraph_CopyRotZoomAMap(int dst, int src, int sx, int sy, int w, int h, float rotate, float mag)
 {
-	gfx_copy_rot_zoom_amap(DTEX(dst), STEX(src), sx, sy, w, h, rotate, mag);
+	gfx_copy_rot_zoom_amap(DTEX_ALPHA(dst), STEX(src), sx, sy, w, h, rotate, mag);
 }
 
 static void DrawGraph_CopyRotZoomUseAMap(int dst, int src, int sx, int sy, int w, int h, float rotate, float mag)
 {
-	gfx_copy_rot_zoom_use_amap(DTEX(dst), STEX(src), sx, sy, w, h, rotate, mag);
+	gfx_copy_rot_zoom_use_amap(DTEX_ALPHA(dst), STEX(src), sx, sy, w, h, rotate, mag);
 }
 
 static void DrawGraph_CopyRotZoom2Bilinear(int dst, float cx, float cy, int src, float scx, float scy, float rot, float mag)
@@ -340,7 +393,7 @@ static void DrawGraph_CopyRotateY(int write, int dst, int src, int sx, int sy, i
 
 static void DrawGraph_CopyRotateYUseAMap(int write, int dst, int src, int sx, int sy, int w, int h, float rot, float mag)
 {
-	gfx_copy_rotate_y_use_amap(DTEX(write), STEX(dst), STEX(src), sx, sy, w, h, rot, mag);
+	gfx_copy_rotate_y_use_amap(DTEX_ALPHA(write), STEX(dst), STEX(src), sx, sy, w, h, rot, mag);
 }
 
 //void DrawGraph_CopyRotateYFixL(int write, int dst, int src, int sx, int sy, int w, int h, float rot, float mag);
@@ -355,7 +408,7 @@ static void DrawGraph_CopyRotateX(int write, int dst, int src, int sx, int sy, i
 
 static void DrawGraph_CopyRotateXUseAMap(int write, int dst, int src, int sx, int sy, int w, int h, float rot, float mag)
 {
-	gfx_copy_rotate_x_use_amap(DTEX(write), STEX(dst), STEX(src), sx, sy, w, h, rot, mag);
+	gfx_copy_rotate_x_use_amap(DTEX_ALPHA(write), STEX(dst), STEX(src), sx, sy, w, h, rot, mag);
 }
 
 //void DrawGraph_CopyRotateXFixU(int write, int dst, int src, int sx, int sy, int w, int h, float rot, float mag);
@@ -375,14 +428,14 @@ static void DrawGraph_CopyReverseUD(int dst, int dx, int dy, int src, int sx, in
 
 static void DrawGraph_CopyReverseAMapLR(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy_reverse_amap_LR(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	gfx_copy_reverse_amap_LR(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h);
 }
 
 //void DrawGraph_CopyReverseAMapUD(int dst, int dx, int dy, int src, int sx, int sy, int w, int h);
 
 static void DrawGraph_CopyReverseLRWithAMap(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy_reverse_LR_with_alpha_map(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	gfx_copy_reverse_LR_with_alpha_map(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h);
 }
 
 //void DrawGraph_CopyReverseUDWithAMap(int nDest, int nDx, int nDy, int nSrc, int nSx, int nSy, int nWidth, int nHeight);
@@ -399,12 +452,12 @@ static void DrawGraph_CopyHeightBlur(int dst, int dx, int dy, int src, int sx, i
 
 static void DrawGraph_CopyAMapWidthBlur(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int blur)
 {
-	gfx_copy_amap_width_blur(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, blur);
+	gfx_copy_amap_width_blur(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, blur);
 }
 
 static void DrawGraph_CopyAMapHeightBlur(int dst, int dx, int dy, int src, int sx, int sy, int w, int h, int blur)
 {
-	gfx_copy_amap_height_blur(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h, blur);
+	gfx_copy_amap_height_blur(DTEX_ALPHA(dst), dx, dy, STEX(src), sx, sy, w, h, blur);
 }
 
 static void DrawGraph_DrawLine(int dst, int x0, int y0, int x1, int y1, int r, int g, int b)
@@ -414,7 +467,7 @@ static void DrawGraph_DrawLine(int dst, int x0, int y0, int x1, int y1, int r, i
 
 static void DrawGraph_DrawLineToAMap(int dst, int x0, int y0, int x1, int y1, int alpha)
 {
-	gfx_draw_line_to_amap(DTEX(dst), x0, y0, x1, y1, alpha);
+	gfx_draw_line_to_amap(DTEX_ALPHA(dst), x0, y0, x1, y1, alpha);
 }
 
 static bool DrawGraph_GetAlphaColor(int surface, int x, int y, int *a)
@@ -455,17 +508,24 @@ static void DrawGraph_DrawDeformedSpriteBilinear(int dst, int tex,
 
 static void DrawGraph_CopyWithAlphaMap(int dst, int dx, int dy, int src, int sx, int sy, int w, int h)
 {
-	gfx_copy_with_alpha_map(DTEX(dst), dx, dy, STEX(src), sx, sy, w, h);
+	struct texture *dst_tex = DTEX_ALPHA(dst);
+	struct texture *src_tex = STEX(src);
+	if (drawgraph_copy_with_alpha_notice_count < 8) {
+		NOTICE("DrawGraph.CopyWithAlphaMap[%d]: dst=%d src=%d dx=%d dy=%d sx=%d sy=%d w=%d h=%d",
+				drawgraph_copy_with_alpha_notice_count, dst, src, dx, dy, sx, sy, w, h);
+		drawgraph_copy_with_alpha_notice_count++;
+	}
+	gfx_copy_with_alpha_map(dst_tex, dx, dy, src_tex, sx, sy, w, h);
 }
 
 static void DrawGraph_FillWithAlpha(int dst, int x, int y, int w, int h, int r, int g, int b, int a)
 {
-	gfx_fill_with_alpha(DTEX(dst), x, y, w, h, r, g, b, a);
+	gfx_fill_with_alpha(DTEX_ALPHA(dst), x, y, w, h, r, g, b, a);
 }
 
 static void DrawGraph_CopyStretchWithAlphaMap(int dst, int dx, int dy, int dw, int dh, int src, int sx, int sy, int sw, int sh)
 {
-	gfx_copy_stretch_with_alpha_map(DTEX(dst), dx, dy, dw, dh, STEX(src), sx, sy, sw, sh);
+	gfx_copy_stretch_with_alpha_map(DTEX_ALPHA(dst), dx, dy, dw, dh, STEX(src), sx, sy, sw, sh);
 }
 
 static void DrawGraph_CopyGrayscale(int dst, int dx, int dy, int src, int sx, int sy, int width, int height)

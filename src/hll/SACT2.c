@@ -231,6 +231,7 @@ void sact_QuakeScreen(int amp_x, int amp_y, int time, int key)
 		gfx_swap();
 		SDL_Delay(16);
 	}
+	gfx_delete_texture(&tex);
 }
 
 //void SACT2_QUAKE_SET_CROSS(int amp_x, int amp_y);

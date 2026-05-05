@@ -24,6 +24,14 @@
 #include <time.h>
 #include <math.h>
 #include <limits.h>
+#if defined(XSYSTEM4_HOST_UTF8)
+#include <errno.h>
+#include <iconv.h>
+#endif
+
+#ifdef __OHOS__
+#include <SDL.h>
+#endif
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -31,6 +39,8 @@
 #define NOGDI
 #include <windows.h>
 #include <shellapi.h>
+#include <psapi.h>
+#include <dbghelp.h>
 #endif
 
 #include "system4.h"
@@ -109,14 +119,22 @@ static wchar_t *decode_multibyte_string(const char *text, UINT codepage)
 static char *encode_wide_string(const wchar_t *text, UINT codepage)
 {
 	BOOL used_default_char = FALSE;
-	int nr_chars = WideCharToMultiByte(codepage, WC_NO_BEST_FIT_CHARS, text, -1,
-			NULL, 0, NULL, &used_default_char);
+	DWORD flags = WC_NO_BEST_FIT_CHARS;
+	BOOL *used_default_char_ptr = &used_default_char;
+
+	if (codepage == CP_UTF8 || codepage == 54936) {
+		flags = 0;
+		used_default_char_ptr = NULL;
+	}
+
+	int nr_chars = WideCharToMultiByte(codepage, flags, text, -1,
+			NULL, 0, NULL, used_default_char_ptr);
 	if (nr_chars <= 0)
 		return NULL;
 
 	char *encoded = xmalloc(nr_chars);
-	if (!WideCharToMultiByte(codepage, WC_NO_BEST_FIT_CHARS, text, -1,
-			encoded, nr_chars, NULL, &used_default_char)) {
+	if (!WideCharToMultiByte(codepage, flags, text, -1,
+			encoded, nr_chars, NULL, used_default_char_ptr)) {
 		free(encoded);
 		return NULL;
 	}
@@ -133,19 +151,162 @@ static char *decode_multibyte_to_utf8(const char *text, UINT codepage)
 	return utf8;
 }
 
-/* Detected game text codepage: 932 (SJIS, default) or 20932 (EUC-JP). */
-static UINT game_str_codepage = 932;
+enum game_text_encoding {
+	GAME_TEXT_ENCODING_AUTO,
+	GAME_TEXT_ENCODING_UTF8,
+	GAME_TEXT_ENCODING_EUC_JP,
+	GAME_TEXT_ENCODING_CP932,
+	GAME_TEXT_ENCODING_GB18030,
+};
 
-/* Conversion function passed to ain_open_conv(): converts game-native encoding -> UTF-8. */
-static char *game_text_to_utf8(const char *str)
+static const UINT game_text_candidate_codepages[] = {
+	CP_UTF8,
+	54936,
+	936,
+	20932,
+	932,
+};
+
+enum xsystem4_ain_conv_section_kind {
+	XSYSTEM4_AIN_CONV_SECTION_GENERAL = 0,
+	XSYSTEM4_AIN_CONV_SECTION_CODE = 1,
+	XSYSTEM4_AIN_CONV_SECTION_MESSAGE = 2,
+};
+
+/* Preferred game text codepage for mixed-encoding titles. */
+static UINT game_str_codepage = 932;
+static bool game_text_encoding_forced = false;
+
+/*
+ * Per-section encoding hint set by ain.c during AIN loading.
+ * CODE sections keep original JP identifiers in CP932.
+ * MESSAGE sections may use the user-forced localized text encoding.
+ * GENERAL sections (for example STR0 constants) stay heuristic-driven so
+ * Japanese script keys are not corrupted by a blanket GB18030 override.
+ */
+extern int xsystem4_ain_conv_code_section;
+
+static const char *game_text_encoding_label(enum game_text_encoding encoding)
 {
-	if (!str)
-		return NULL;
-	if (is_ascii_text(str))
-		return strdup(str);
-	return decode_multibyte_to_utf8(str, game_str_codepage);
+	switch (encoding) {
+	case GAME_TEXT_ENCODING_AUTO:
+		return "auto";
+	case GAME_TEXT_ENCODING_UTF8:
+		return "UTF-8";
+	case GAME_TEXT_ENCODING_EUC_JP:
+		return "EUC-JP";
+	case GAME_TEXT_ENCODING_CP932:
+		return "CP932";
+	case GAME_TEXT_ENCODING_GB18030:
+		return "GB18030";
+	default:
+		return "unknown";
+	}
 }
 
+static UINT game_text_encoding_codepage(enum game_text_encoding encoding)
+{
+	switch (encoding) {
+	case GAME_TEXT_ENCODING_UTF8:
+		return CP_UTF8;
+	case GAME_TEXT_ENCODING_EUC_JP:
+		return 20932;
+	case GAME_TEXT_ENCODING_CP932:
+		return 932;
+	case GAME_TEXT_ENCODING_GB18030:
+		return 54936;
+	case GAME_TEXT_ENCODING_AUTO:
+	default:
+		return 0;
+	}
+}
+
+static enum game_text_encoding game_text_encoding_from_codepage(UINT codepage)
+{
+	switch (codepage) {
+	case CP_UTF8:
+		return GAME_TEXT_ENCODING_UTF8;
+	case 20932:
+		return GAME_TEXT_ENCODING_EUC_JP;
+	case 936:
+	case 54936:
+		return GAME_TEXT_ENCODING_GB18030;
+	case 932:
+	default:
+		return GAME_TEXT_ENCODING_CP932;
+	}
+}
+
+static bool parse_game_text_encoding(const char *text, enum game_text_encoding *encoding)
+{
+	if (!text || !*text)
+		return false;
+
+	if (!strcasecmp(text, "auto")) {
+		*encoding = GAME_TEXT_ENCODING_AUTO;
+		return true;
+	}
+	if (!strcasecmp(text, "utf8") || !strcasecmp(text, "utf-8")) {
+		*encoding = GAME_TEXT_ENCODING_UTF8;
+		return true;
+	}
+	if (!strcasecmp(text, "euc-jp") || !strcasecmp(text, "eucjp")) {
+		*encoding = GAME_TEXT_ENCODING_EUC_JP;
+		return true;
+	}
+	if (!strcasecmp(text, "cp932")
+			|| !strcasecmp(text, "sjis")
+			|| !strcasecmp(text, "shift-jis")
+			|| !strcasecmp(text, "shift_jis")
+			|| !strcasecmp(text, "windows-31j")
+			|| !strcasecmp(text, "ms932")) {
+		*encoding = GAME_TEXT_ENCODING_CP932;
+		return true;
+	}
+	if (!strcasecmp(text, "gb18030")
+			|| !strcasecmp(text, "gbk")
+			|| !strcasecmp(text, "cp936")) {
+		*encoding = GAME_TEXT_ENCODING_GB18030;
+		return true;
+	}
+	return false;
+}
+
+static void force_game_text_encoding(enum game_text_encoding encoding, const char *source)
+{
+	if (encoding == GAME_TEXT_ENCODING_AUTO) {
+		game_text_encoding_forced = false;
+		game_str_codepage = 932;
+		NOTICE("xsystem4 text encoding set to auto (%s)", source);
+		return;
+	}
+
+	game_text_encoding_forced = true;
+	game_str_codepage = game_text_encoding_codepage(encoding);
+	NOTICE("xsystem4 text encoding forced to %s (%s)",
+			game_text_encoding_label(encoding), source);
+}
+
+static void configure_game_text_encoding(const char *text, const char *source)
+{
+	enum game_text_encoding encoding;
+
+	if (!parse_game_text_encoding(text, &encoding)) {
+		WARNING("Invalid value for text encoding in %s: \"%s\"", source, text);
+		return;
+	}
+	force_game_text_encoding(encoding, source);
+}
+
+static void apply_env_game_text_encoding_override(void)
+{
+	char *env = getenv("XSYSTEM4_TEXT_ENCODING");
+
+	if (env && *env)
+		configure_game_text_encoding(env, "XSYSTEM4_TEXT_ENCODING");
+}
+
+/* Conversion function passed to ain_open_conv(): converts game-native encoding -> UTF-8. */
 static int score_decoded_string(const wchar_t *text)
 {
 	int score = 0;
@@ -156,13 +317,23 @@ static int score_decoded_string(const wchar_t *text)
 			score -= 20;
 		} else if (c >= 0xE000 && c <= 0xF8FF) {
 			score -= 20;
-		} else if ((c >= 0x3040 && c <= 0x30FF)
-				|| (c >= 0x3400 && c <= 0x4DBF)
-				|| (c >= 0x4E00 && c <= 0x9FFF)
-				|| (c >= 0xFF10 && c <= 0xFF19)
+		} else if (c >= 0x3040 && c <= 0x30FF) {
+			score += 7;
+		} else if ((c >= 0x3400 && c <= 0x4DBF)
+				|| (c >= 0x4E00 && c <= 0x9FFF)) {
+			score += 3;
+		} else if ((c >= 0x3001 && c <= 0x303F)
+				|| (c >= 0xFF01 && c <= 0xFF60)
+				|| c == 0x2014
+				|| c == 0x2018
+				|| c == 0x2019
+				|| c == 0x201C
+				|| c == 0x201D) {
+			score += 2;
+		} else if ((c >= 0xFF10 && c <= 0xFF19)
 				|| (c >= 0xFF21 && c <= 0xFF3A)
 				|| (c >= 0xFF41 && c <= 0xFF5A)) {
-			score += 4;
+			score += 2;
 		} else if ((c >= 0x20 && c <= 0x7E) || c == 0x3000) {
 			score += 2;
 		} else if (c == 0x30FB || c == 0xFF65) {
@@ -175,63 +346,204 @@ static int score_decoded_string(const wchar_t *text)
 	return score;
 }
 
-static char *normalize_ini_game_text(const char *text)
+static bool use_detected_text_codepage(UINT preferred_codepage, int preferred_score,
+		UINT detected_codepage, int detected_score)
 {
+	if (!preferred_codepage || preferred_score == INT_MIN)
+		return true;
+	if (preferred_codepage == detected_codepage)
+		return true;
+	if (preferred_score < 0)
+		return true;
+	if (detected_codepage == CP_UTF8 && detected_score >= preferred_score)
+		return true;
+	return detected_score >= preferred_score + 8;
+}
+
+static char *detect_best_game_text_to_utf8(const char *text,
+		UINT preferred_codepage, UINT *detected_codepage)
+{
+	char *best_utf8 = NULL;
+	int best_score = INT_MIN;
+	int preferred_score = INT_MIN;
+	UINT best_codepage = 0;
+	char *preferred_utf8 = NULL;
+
+	for (size_t i = 0; i < sizeof(game_text_candidate_codepages) / sizeof(game_text_candidate_codepages[0]); i++) {
+		UINT codepage = game_text_candidate_codepages[i];
+		wchar_t *candidate = decode_multibyte_string(text, codepage);
+		if (!candidate)
+			continue;
+
+		int score = score_decoded_string(candidate);
+		char *candidate_utf8 = wchar_to_utf8(candidate);
+		free(candidate);
+		if (!candidate_utf8)
+			continue;
+
+		if (codepage == preferred_codepage) {
+			free(preferred_utf8);
+			preferred_utf8 = strdup(candidate_utf8);
+			preferred_score = score;
+		}
+
+		if (!best_utf8 || score > best_score) {
+			free(best_utf8);
+			best_utf8 = candidate_utf8;
+			best_score = score;
+			best_codepage = codepage;
+		} else {
+			free(candidate_utf8);
+		}
+	}
+
+	if (detected_codepage)
+		*detected_codepage = best_codepage;
+
+	if (!best_utf8)
+		return NULL;
+	if (preferred_utf8
+			&& !use_detected_text_codepage(preferred_codepage, preferred_score,
+					best_codepage, best_score)) {
+		free(best_utf8);
+		return preferred_utf8;
+	}
+
+	free(preferred_utf8);
+	return best_utf8;
+}
+
+/* Conversion function passed to ain_open_conv(): converts game-native encoding -> UTF-8. */
+static char *game_text_to_utf8(const char *str)
+{
+	UINT detected_codepage = 0;
+	char *utf8;
+	bool is_code_section = xsystem4_ain_conv_code_section == XSYSTEM4_AIN_CONV_SECTION_CODE;
+	bool is_message_section = xsystem4_ain_conv_code_section == XSYSTEM4_AIN_CONV_SECTION_MESSAGE;
+
+	if (!str)
+		return NULL;
+	if (is_ascii_text(str))
+		return strdup(str);
+	/*
+	 * For mixed-encoding AIN files (e.g. Chinese-localized AliceSoft games),
+	 * code identifiers in FUNC/STRT/GLOB/HLL0 are always in the original
+	 * game encoding (CP932), while game text in STR0/MSG0 may be in a
+	 * different encoding (e.g. GB18030).  Force CP932 for code sections
+	 * to avoid misdetection when CJK kanji score equally in both codepages.
+	 * This check must come before game_text_encoding_forced so that user-
+	 * specified encoding (e.g. gb18030 from .xsys4rc) does not corrupt
+	 * CP932 code identifiers.
+	 */
+	if (is_code_section)
+		return decode_multibyte_to_utf8(str, 932);
+	if (game_text_encoding_forced && is_message_section)
+		return decode_multibyte_to_utf8(str, game_str_codepage);
+
+	utf8 = detect_best_game_text_to_utf8(str, game_str_codepage, &detected_codepage);
+	if (utf8)
+		return utf8;
+	return decode_multibyte_to_utf8(str, game_str_codepage);
+}
+
+static char *resource_text_to_utf8(const char *text)
+{
+	UINT preferred_codepage = game_text_encoding_forced ? 932 : game_str_codepage;
+	char *utf8;
+
 	if (!text)
 		return NULL;
 	if (is_ascii_text(text))
 		return strdup(text);
 
-	/* Try UTF-8, then system ANSI (GBK on Chinese Windows, CP_ACP),
-	 * then EUC-JP (cp20932), then cp51932, then SJIS/cp932. */
-	static const UINT codepages[] = { CP_UTF8, CP_ACP, 20932, 51932, 932 };
-	wchar_t *best = NULL;
-	int best_score = INT_MIN;
+	utf8 = detect_best_game_text_to_utf8(text, preferred_codepage, NULL);
+	if (utf8)
+		return utf8;
+	return decode_multibyte_to_utf8(text, preferred_codepage);
+}
 
-	for (size_t i = 0; i < sizeof(codepages) / sizeof(codepages[0]); i++) {
-		wchar_t *candidate = decode_multibyte_string(text, codepages[i]);
-		if (!candidate)
-			continue;
+static char *normalize_ini_game_text(const char *text)
+{
+	UINT detected_codepage = 0;
+	char *utf8;
 
-		int score = score_decoded_string(candidate);
-		if (!best || score > best_score) {
-			free(best);
-			best = candidate;
-			best_score = score;
-		} else {
-			free(candidate);
-		}
+	if (!text)
+		return NULL;
+	if (is_ascii_text(text))
+		return strdup(text);
+	if (game_text_encoding_forced) {
+		char *forced = decode_multibyte_to_utf8(text, game_str_codepage);
+		return forced ? forced : strdup(text);
 	}
 
-	if (!best)
-		return strdup(text);
-
-	char *utf8 = wchar_to_utf8(best);
-	free(best);
-	if (!utf8)
-		return strdup(text);
-	return utf8;
+	utf8 = detect_best_game_text_to_utf8(text, game_str_codepage, &detected_codepage);
+	return utf8 ? utf8 : strdup(text);
 }
 
 static char *utf8_to_game_text(const char *text)
 {
-	/* On Windows all config strings are UTF-8; return a plain copy. */
 	return text ? strdup(text) : NULL;
+}
+
+char *xsystem4_utf8_to_ain_text(const char *text)
+{
+	return text ? strdup(text) : NULL;
+}
+
+char *xsystem4_game_text_to_utf8(const char *text)
+{
+	return game_text_to_utf8(text);
+}
+
+char *xsystem4_resource_text_to_utf8(const char *text)
+{
+	return resource_text_to_utf8(text);
+}
+
+char *xsystem4_resource_lookup_alias(const char *text)
+{
+	wchar_t *wide;
+	char *encoded;
+	char *alias;
+
+	if (!text || !*text || !game_text_encoding_forced || game_str_codepage == 932)
+		return NULL;
+
+	wide = decode_multibyte_string(text, CP_UTF8);
+	if (!wide)
+		return NULL;
+	encoded = encode_wide_string(wide, game_str_codepage);
+	free(wide);
+	if (!encoded)
+		return NULL;
+	alias = decode_multibyte_to_utf8(encoded, 932);
+	free(encoded);
+	if (!alias || !strcmp(alias, text)) {
+		free(alias);
+		return NULL;
+	}
+	return alias;
 }
 
 static char *resolve_ini_ain_filename(const char *game_dir, const char *raw_name)
 {
 	if (!raw_name)
 		return NULL;
+	if (is_ascii_text(raw_name))
+		return strdup(raw_name);
+	if (game_text_encoding_forced) {
+		char *utf8_name = decode_multibyte_to_utf8(raw_name, game_str_codepage);
+		if (utf8_name)
+			return utf8_name;
+	}
 
 	/*
 	 * The CodeName value in alicestart.ini may be encoded in EUC-JP (cp20932)
 	 * rather than the expected SJIS, particularly in older Alice Soft titles.
-	 * Try UTF-8, EUC-JP (cp20932), SJIS in order; pick the first whose decoded
-	 * name exists on the filesystem.  cp51932 is intentionally omitted because
-	 * it is not reliably available on all Windows installations.
+	 * Try UTF-8, GB18030/GBK, system ANSI, EUC-JP (cp20932), SJIS in order;
+	 * pick the first whose decoded name exists on the filesystem.
 	 */
-	static const UINT codepages[] = { CP_UTF8, 20932, 932 };
+	static const UINT codepages[] = { CP_UTF8, 54936, 936, CP_ACP, 20932, 932 };
 	for (size_t i = 0; i < sizeof(codepages) / sizeof(codepages[0]); i++) {
 		char *utf8_name = decode_multibyte_to_utf8(raw_name, codepages[i]);
 		if (!utf8_name)
@@ -241,11 +553,14 @@ static char *resolve_ini_ain_filename(const char *game_dir, const char *raw_name
 		bool exists = file_exists(candidate);
 		free(candidate);
 		if (exists) {
-			/* Record the detected encoding for ain_open_conv(). */
-			game_str_codepage = codepages[i];
-			char *resolved = utf8_to_game_text(utf8_name);
-			free(utf8_name);
-			return resolved;
+			if (!game_text_encoding_forced) {
+				game_str_codepage = codepages[i];
+				NOTICE("xsystem4 AIN filename encoding detected as %s, "
+						"setting game text preference to codepage %u (%s)",
+						game_text_encoding_label(game_text_encoding_from_codepage(codepages[i])),
+						codepages[i], "CodeName");
+			}
+			return utf8_name;
 		}
 		free(utf8_name);
 	}
@@ -268,6 +583,849 @@ static char **normalize_argv_utf8(int *argc)
 	*argc = wargc;
 	return utf8_argv;
 }
+#elif defined(XSYSTEM4_HOST_UTF8)
+enum game_text_encoding {
+	GAME_TEXT_ENCODING_AUTO,
+	GAME_TEXT_ENCODING_UTF8,
+	GAME_TEXT_ENCODING_EUC_JP,
+	GAME_TEXT_ENCODING_CP932,
+	GAME_TEXT_ENCODING_GB18030,
+	GAME_TEXT_ENCODING_NR,
+};
+
+static const enum game_text_encoding game_text_candidate_encodings[] = {
+	GAME_TEXT_ENCODING_UTF8,
+	GAME_TEXT_ENCODING_GB18030,
+	GAME_TEXT_ENCODING_EUC_JP,
+	GAME_TEXT_ENCODING_CP932,
+};
+
+enum xsystem4_ain_conv_section_kind {
+	XSYSTEM4_AIN_CONV_SECTION_GENERAL = 0,
+	XSYSTEM4_AIN_CONV_SECTION_CODE = 1,
+	XSYSTEM4_AIN_CONV_SECTION_MESSAGE = 2,
+};
+
+/* Detected game text encoding for AIN strings on UTF-8 hosts. */
+static enum game_text_encoding game_str_encoding = GAME_TEXT_ENCODING_AUTO;
+static bool game_text_encoding_locked = false;
+static bool game_text_encoding_forced = false;
+
+/*
+ * Per-section encoding hint set by ain.c during AIN loading.
+ * CODE sections keep original JP identifiers in CP932.
+ * MESSAGE sections may use the user-forced localized text encoding.
+ * GENERAL sections (for example STR0 constants) stay heuristic-driven so
+ * Japanese script keys are not corrupted by a blanket GB18030 override.
+ */
+extern int xsystem4_ain_conv_code_section;
+static int game_text_auto_scores[GAME_TEXT_ENCODING_NR];
+static int game_text_auto_samples = 0;
+
+static const char *game_text_encoding_label(enum game_text_encoding encoding)
+{
+	switch (encoding) {
+	case GAME_TEXT_ENCODING_AUTO:
+		return "auto";
+	case GAME_TEXT_ENCODING_UTF8:
+		return "UTF-8";
+	case GAME_TEXT_ENCODING_EUC_JP:
+		return "EUC-JP";
+	case GAME_TEXT_ENCODING_CP932:
+		return "CP932";
+	case GAME_TEXT_ENCODING_GB18030:
+		return "GB18030";
+	default:
+		return "unknown";
+	}
+}
+
+static const char *const *game_text_encoding_names(enum game_text_encoding encoding)
+{
+	static const char *const utf8_names[] = { "UTF-8", NULL };
+	static const char *const euc_jp_names[] = { "EUC-JP", "eucJP", NULL };
+	static const char *const cp932_names[] = {
+		"CP932", "WINDOWS-31J", "MS932", "SHIFT-JIS", "SHIFT_JIS", "SJIS", NULL
+	};
+	static const char *const gb18030_names[] = {
+		"GB18030", "GBK", "CP936", NULL
+	};
+
+	switch (encoding) {
+	case GAME_TEXT_ENCODING_AUTO:
+		return NULL;
+	case GAME_TEXT_ENCODING_UTF8:
+		return utf8_names;
+	case GAME_TEXT_ENCODING_EUC_JP:
+		return euc_jp_names;
+	case GAME_TEXT_ENCODING_GB18030:
+		return gb18030_names;
+	case GAME_TEXT_ENCODING_CP932:
+	default:
+		return cp932_names;
+	}
+}
+
+static void reset_game_text_auto_detection(void)
+{
+	game_str_encoding = GAME_TEXT_ENCODING_AUTO;
+	game_text_encoding_locked = false;
+	memset(game_text_auto_scores, 0, sizeof(game_text_auto_scores));
+	game_text_auto_samples = 0;
+}
+
+static bool parse_game_text_encoding(const char *text, enum game_text_encoding *encoding)
+{
+	if (!text || !*text)
+		return false;
+
+	if (!strcasecmp(text, "auto")) {
+		*encoding = GAME_TEXT_ENCODING_AUTO;
+		return true;
+	}
+	if (!strcasecmp(text, "utf8") || !strcasecmp(text, "utf-8")) {
+		*encoding = GAME_TEXT_ENCODING_UTF8;
+		return true;
+	}
+	if (!strcasecmp(text, "euc-jp") || !strcasecmp(text, "eucjp")) {
+		*encoding = GAME_TEXT_ENCODING_EUC_JP;
+		return true;
+	}
+	if (!strcasecmp(text, "cp932")
+			|| !strcasecmp(text, "sjis")
+			|| !strcasecmp(text, "shift-jis")
+			|| !strcasecmp(text, "shift_jis")
+			|| !strcasecmp(text, "windows-31j")
+			|| !strcasecmp(text, "ms932")) {
+		*encoding = GAME_TEXT_ENCODING_CP932;
+		return true;
+	}
+	if (!strcasecmp(text, "gb18030")
+			|| !strcasecmp(text, "gbk")
+			|| !strcasecmp(text, "cp936")) {
+		*encoding = GAME_TEXT_ENCODING_GB18030;
+		return true;
+	}
+	return false;
+}
+
+static void force_game_text_encoding(enum game_text_encoding encoding, const char *source)
+{
+	if (encoding == GAME_TEXT_ENCODING_AUTO) {
+		game_text_encoding_forced = false;
+		reset_game_text_auto_detection();
+		NOTICE("xsystem4 text encoding set to auto (%s)", source);
+		#ifdef __OHOS__
+		SDL_Log("[xsystem4_text] encoding set to auto (%s)", source);
+		#endif
+		return;
+	}
+
+	game_text_encoding_forced = true;
+	game_str_encoding = encoding;
+	game_text_encoding_locked = true;
+	memset(game_text_auto_scores, 0, sizeof(game_text_auto_scores));
+	game_text_auto_samples = 0;
+	NOTICE("xsystem4 text encoding forced to %s (%s)",
+			game_text_encoding_label(encoding), source);
+	#ifdef __OHOS__
+	SDL_Log("[xsystem4_text] encoding forced to %s (%s)",
+			game_text_encoding_label(encoding), source);
+	#endif
+}
+
+static void configure_game_text_encoding(const char *text, const char *source)
+{
+	enum game_text_encoding encoding;
+
+	if (!parse_game_text_encoding(text, &encoding)) {
+		WARNING("Invalid value for text encoding in %s: \"%s\"", source, text);
+		return;
+	}
+	force_game_text_encoding(encoding, source);
+}
+
+static void lock_game_text_encoding(enum game_text_encoding encoding, const char *source)
+{
+	if (game_text_encoding_forced || encoding == GAME_TEXT_ENCODING_AUTO || game_text_encoding_locked)
+		return;
+
+	game_str_encoding = encoding;
+	game_text_encoding_locked = true;
+	NOTICE("xsystem4 text encoding detected as %s (%s)",
+			game_text_encoding_label(encoding), source);
+	#ifdef __OHOS__
+	SDL_Log("[xsystem4_text] encoding detected as %s (%s)",
+			game_text_encoding_label(encoding), source);
+	#endif
+}
+
+static void apply_env_game_text_encoding_override(void)
+{
+	char *env = getenv("XSYSTEM4_TEXT_ENCODING");
+
+	if (env && *env)
+		configure_game_text_encoding(env, "XSYSTEM4_TEXT_ENCODING");
+}
+
+#ifdef __OHOS__
+static int xsystem4_text_trace_budget = 12;
+static int xsystem4_text_passthrough_warn_budget = 8;
+
+static void format_text_bytes_preview(const char *text, char *out, size_t out_size)
+{
+	size_t used = 0;
+	size_t index = 0;
+
+	if (!out_size)
+		return;
+	if (!text) {
+		snprintf(out, out_size, "<null>");
+		return;
+	}
+
+	while (text[index] && index < 12 && used + 4 < out_size) {
+		used += snprintf(out + used, out_size - used,
+				index ? " %02X" : "%02X", (unsigned char)text[index]);
+		index++;
+	}
+	if (text[index] && used + 5 < out_size)
+		snprintf(out + used, out_size - used, " ...");
+	else if (used < out_size)
+		out[used] = '\0';
+}
+
+static void format_text_utf8_preview(const char *text, char *out, size_t out_size)
+{
+	size_t in_index = 0;
+	size_t out_index = 0;
+
+	if (!out_size)
+		return;
+	if (!text) {
+		snprintf(out, out_size, "<null>");
+		return;
+	}
+
+	while (text[in_index] && in_index < 48 && out_index + 1 < out_size) {
+		unsigned char c = (unsigned char)text[in_index++];
+		if (c == '\r' || c == '\n' || c == '\t')
+			out[out_index++] = ' ';
+		else
+			out[out_index++] = (char)c;
+	}
+	if (text[in_index] && out_index + 4 < out_size) {
+		memcpy(out + out_index, "...", 4);
+		return;
+	}
+	out[out_index] = '\0';
+}
+
+static void trace_text_conversion_sample(const char *label,
+		const char *raw,
+		enum game_text_encoding source_encoding,
+		const char *utf8)
+{
+	char raw_hex[80];
+	char utf8_preview[128];
+
+	if (xsystem4_text_trace_budget <= 0 || !raw || !utf8 || is_ascii_text(raw))
+		return;
+
+	format_text_bytes_preview(raw, raw_hex, sizeof(raw_hex));
+	format_text_utf8_preview(utf8, utf8_preview, sizeof(utf8_preview));
+	NOTICE("xsystem4 text trace [%s]: source=%s raw=%s utf8=%s",
+			label,
+			game_text_encoding_label(source_encoding),
+			raw_hex,
+			utf8_preview);
+	SDL_Log("[xsystem4_text] trace[%s] source=%s raw=%s utf8=%s",
+			label,
+			game_text_encoding_label(source_encoding),
+			raw_hex,
+			utf8_preview);
+	xsystem4_text_trace_budget--;
+}
+
+static void warn_raw_text_passthrough(const char *label,
+		const char *raw,
+		enum game_text_encoding source_encoding)
+{
+	char raw_hex[80];
+
+	if (xsystem4_text_passthrough_warn_budget <= 0 || !raw || is_ascii_text(raw))
+		return;
+
+	format_text_bytes_preview(raw, raw_hex, sizeof(raw_hex));
+	WARNING("xsystem4 text trace [%s]: failed to decode %s on UTF-8 host; passing raw bytes through (raw=%s)",
+			label,
+			game_text_encoding_label(source_encoding),
+			raw_hex);
+	SDL_Log("[xsystem4_text] failed to decode %s for %s on UTF-8 host; passing raw bytes through (raw=%s)",
+			label,
+			game_text_encoding_label(source_encoding),
+			raw_hex);
+	xsystem4_text_passthrough_warn_budget--;
+}
+#else
+static void trace_text_conversion_sample(const char *label,
+		const char *raw,
+		enum game_text_encoding source_encoding,
+		const char *utf8)
+{
+	(void)label;
+	(void)raw;
+	(void)source_encoding;
+	(void)utf8;
+}
+
+static void warn_raw_text_passthrough(const char *label,
+		const char *raw,
+		enum game_text_encoding source_encoding)
+{
+	(void)label;
+	(void)raw;
+	(void)source_encoding;
+}
+#endif
+
+static char *convert_text_with_iconv(const char *text, const char *to_name, const char *from_name)
+{
+	if (!text || !to_name || !from_name)
+		return NULL;
+
+	iconv_t cd = iconv_open(to_name, from_name);
+	if (cd == (iconv_t)-1)
+		return NULL;
+
+	size_t input_len = strlen(text);
+	size_t output_capacity = input_len * 4 + 16;
+	if (output_capacity < 32)
+		output_capacity = 32;
+
+	char *output = xmalloc(output_capacity);
+	char *out_ptr = output;
+	char *in_ptr = (char *)text;
+	size_t in_left = input_len;
+
+	while (true) {
+		size_t out_used = (size_t)(out_ptr - output);
+		size_t out_left = output_capacity - out_used;
+		size_t result = iconv(cd, &in_ptr, &in_left, &out_ptr, &out_left);
+		if (result != (size_t)-1)
+			break;
+		if (errno != E2BIG) {
+			free(output);
+			iconv_close(cd);
+			return NULL;
+		}
+
+		output_capacity *= 2;
+		output = xrealloc(output, output_capacity);
+		out_ptr = output + out_used;
+	}
+
+	while (true) {
+		size_t out_used = (size_t)(out_ptr - output);
+		size_t out_left = output_capacity - out_used;
+		size_t result = iconv(cd, NULL, NULL, &out_ptr, &out_left);
+		if (result != (size_t)-1)
+			break;
+		if (errno != E2BIG) {
+			free(output);
+			iconv_close(cd);
+			return NULL;
+		}
+
+		output_capacity *= 2;
+		output = xrealloc(output, output_capacity);
+		out_ptr = output + out_used;
+	}
+
+	*out_ptr = '\0';
+	iconv_close(cd);
+	return output;
+}
+
+static char *decode_multibyte_to_utf8(const char *text, enum game_text_encoding encoding)
+{
+	if (!text)
+		return NULL;
+	if (encoding == GAME_TEXT_ENCODING_AUTO)
+		return NULL;
+	if (encoding == GAME_TEXT_ENCODING_UTF8)
+		return strdup(text);
+	if (encoding == GAME_TEXT_ENCODING_CP932)
+		return sjis2utf(text, 0);
+
+	for (const char *const *name = game_text_encoding_names(encoding); *name; name++) {
+		char *converted = convert_text_with_iconv(text, "UTF-8", *name);
+		if (converted)
+			return converted;
+	}
+
+	for (const char *const *name = game_text_encoding_names(encoding); *name; name++) {
+		char *converted = SDL_iconv_string("UTF-8", *name, text, strlen(text) + 1);
+		if (!converted)
+			continue;
+		char *copy = strdup(converted);
+		SDL_free(converted);
+		return copy;
+	}
+	return NULL;
+}
+
+static char *encode_utf8_to_multibyte(const char *text, enum game_text_encoding encoding)
+{
+	if (!text)
+		return NULL;
+	if (encoding == GAME_TEXT_ENCODING_AUTO)
+		return NULL;
+	if (encoding == GAME_TEXT_ENCODING_UTF8)
+		return strdup(text);
+	if (encoding == GAME_TEXT_ENCODING_CP932)
+		return utf2sjis(text, 0);
+
+	for (const char *const *name = game_text_encoding_names(encoding); *name; name++) {
+		char *converted = convert_text_with_iconv(text, *name, "UTF-8");
+		if (converted)
+			return converted;
+	}
+
+	for (const char *const *name = game_text_encoding_names(encoding); *name; name++) {
+		char *converted = SDL_iconv_string(*name, "UTF-8", text, strlen(text) + 1);
+		if (!converted)
+			continue;
+		char *copy = strdup(converted);
+		SDL_free(converted);
+		return copy;
+	}
+	return NULL;
+}
+
+static bool utf8_decode_codepoint(const unsigned char **ptr, unsigned int *codepoint)
+{
+	const unsigned char *p = *ptr;
+	unsigned int c;
+
+	if (*p < 0x80) {
+		*codepoint = *p;
+		*ptr = p + 1;
+		return true;
+	}
+
+	if ((p[0] & 0xE0) == 0xC0) {
+		if ((p[1] & 0xC0) != 0x80)
+			return false;
+		c = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+		if (c < 0x80)
+			return false;
+		*codepoint = c;
+		*ptr = p + 2;
+		return true;
+	}
+
+	if ((p[0] & 0xF0) == 0xE0) {
+		if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80)
+			return false;
+		c = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+		if (c < 0x800 || (c >= 0xD800 && c <= 0xDFFF))
+			return false;
+		*codepoint = c;
+		*ptr = p + 3;
+		return true;
+	}
+
+	if ((p[0] & 0xF8) == 0xF0) {
+		if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80 || (p[3] & 0xC0) != 0x80)
+			return false;
+		c = ((p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) | ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+		if (c < 0x10000 || c > 0x10FFFF)
+			return false;
+		*codepoint = c;
+		*ptr = p + 4;
+		return true;
+	}
+
+	return false;
+}
+
+static bool is_valid_utf8_text(const char *text)
+{
+	const unsigned char *p = (const unsigned char *)text;
+
+	if (!p)
+		return false;
+
+	while (*p) {
+		unsigned int codepoint;
+		const unsigned char *next = p;
+		if (!utf8_decode_codepoint(&next, &codepoint))
+			return false;
+		p = next;
+	}
+
+	return true;
+}
+
+static int score_utf8_string(const char *text)
+{
+	int score = 0;
+	const unsigned char *p = (const unsigned char *)text;
+
+	while (*p) {
+		unsigned int c = 0;
+		const unsigned char *next = p;
+		if (!utf8_decode_codepoint(&next, &c)) {
+			score -= 20;
+			p++;
+			continue;
+		}
+		p = next;
+
+		if (c < 0x20 && c != '\t' && c != '\r' && c != '\n') {
+			score -= 20;
+		} else if (c == 0xFFFD) {
+			score -= 20;
+		} else if (c >= 0x3040 && c <= 0x30FF) {
+			score += 7;
+		} else if ((c >= 0x3400 && c <= 0x4DBF)
+				|| (c >= 0x4E00 && c <= 0x9FFF)) {
+			score += 3;
+		} else if ((c >= 0x3001 && c <= 0x303F)
+				|| (c >= 0xFF01 && c <= 0xFF60)
+				|| c == 0x2014
+				|| c == 0x2018
+				|| c == 0x2019
+				|| c == 0x201C
+				|| c == 0x201D) {
+			score += 2;
+		} else if ((c >= 0xFF10 && c <= 0xFF19)
+				|| (c >= 0xFF21 && c <= 0xFF3A)
+				|| (c >= 0xFF41 && c <= 0xFF5A)) {
+			score += 2;
+		} else if ((c >= 0x20 && c <= 0x7E) || c == 0x3000) {
+			score += 2;
+		} else if (c == 0x30FB || c == 0xFF65) {
+			score -= 2;
+		} else if (c >= 0xFF61 && c <= 0xFF9F) {
+			score -= 1;
+		}
+	}
+
+	return score;
+}
+
+static char *detect_best_game_text_to_utf8(const char *text,
+		enum game_text_encoding *best_encoding, int scores[GAME_TEXT_ENCODING_NR])
+{
+	char *best = NULL;
+	int best_score = INT_MIN;
+	size_t nr_candidates = sizeof(game_text_candidate_encodings) / sizeof(game_text_candidate_encodings[0]);
+
+	if (scores) {
+		for (int i = 0; i < GAME_TEXT_ENCODING_NR; i++)
+			scores[i] = INT_MIN;
+	}
+	if (best_encoding)
+		*best_encoding = GAME_TEXT_ENCODING_AUTO;
+
+	for (size_t i = 0; i < nr_candidates; i++) {
+		enum game_text_encoding encoding = game_text_candidate_encodings[i];
+		char *candidate = decode_multibyte_to_utf8(text, encoding);
+		if (!candidate)
+			continue;
+
+		int score = score_utf8_string(candidate);
+		if (scores)
+			scores[encoding] = score;
+		if (!best || score > best_score) {
+			free(best);
+			best = candidate;
+			best_score = score;
+			if (best_encoding)
+				*best_encoding = encoding;
+		} else {
+			free(candidate);
+		}
+	}
+
+	return best;
+}
+
+static void update_auto_game_text_detection(const int scores[GAME_TEXT_ENCODING_NR])
+{
+	int best_score = INT_MIN;
+	int runner_up = INT_MIN;
+	enum game_text_encoding best_encoding = GAME_TEXT_ENCODING_AUTO;
+	size_t nr_candidates = sizeof(game_text_candidate_encodings) / sizeof(game_text_candidate_encodings[0]);
+	bool saw_valid_score = false;
+
+	if (game_text_encoding_forced || game_text_encoding_locked)
+		return;
+
+	for (size_t i = 0; i < nr_candidates; i++) {
+		enum game_text_encoding encoding = game_text_candidate_encodings[i];
+		if (scores[encoding] == INT_MIN)
+			continue;
+		saw_valid_score = true;
+		game_text_auto_scores[encoding] += scores[encoding];
+	}
+	if (!saw_valid_score)
+		return;
+
+	game_text_auto_samples++;
+	for (size_t i = 0; i < nr_candidates; i++) {
+		enum game_text_encoding encoding = game_text_candidate_encodings[i];
+		int score = game_text_auto_scores[encoding];
+		if (score > best_score) {
+			runner_up = best_score;
+			best_score = score;
+			best_encoding = encoding;
+		} else if (score > runner_up) {
+			runner_up = score;
+		}
+	}
+
+	if (best_encoding == GAME_TEXT_ENCODING_AUTO || best_score <= 0)
+		return;
+	if (game_text_auto_samples >= 6
+			|| (runner_up != INT_MIN && best_score - runner_up >= 40)) {
+		lock_game_text_encoding(best_encoding, "AIN text sampling");
+	}
+}
+
+/* Conversion function passed to ain_open_conv(): converts game-native encoding -> UTF-8. */
+static char *game_text_to_utf8(const char *str)
+{
+	int scores[GAME_TEXT_ENCODING_NR];
+	enum game_text_encoding detected_encoding = GAME_TEXT_ENCODING_AUTO;
+	char *utf8;
+	char *preferred = NULL;
+	int preferred_score = INT_MIN;
+	bool is_code_section = xsystem4_ain_conv_code_section == XSYSTEM4_AIN_CONV_SECTION_CODE;
+	bool is_message_section = xsystem4_ain_conv_code_section == XSYSTEM4_AIN_CONV_SECTION_MESSAGE;
+
+	if (!str)
+		return NULL;
+	if (is_ascii_text(str))
+		return strdup(str);
+
+	/* Code sections (FUNC, STRT, GLOB, etc.) always use CP932.
+	 * Use libsys4's built-in sjis2utf() instead of SDL_iconv
+	 * because HarmonyOS musl iconv may not support CP932/SJIS. */
+	if (is_code_section) {
+		char *converted = sjis2utf(str, 0);
+		trace_text_conversion_sample("ain-code", str, GAME_TEXT_ENCODING_CP932, converted);
+		return converted;
+	}
+	/*
+	 * Match Windows behavior more closely: once the game has an explicit or
+	 * inferred non-auto text encoding, do not let a byte sequence that merely
+	 * happens to be valid UTF-8 bypass the intended decoder.
+	 */
+	if (!game_text_encoding_forced
+			&& game_str_encoding == GAME_TEXT_ENCODING_AUTO
+			&& is_valid_utf8_text(str))
+		return strdup(str);
+
+	if (game_str_encoding != GAME_TEXT_ENCODING_AUTO) {
+		preferred = decode_multibyte_to_utf8(str, game_str_encoding);
+		if (preferred)
+			preferred_score = score_utf8_string(preferred);
+		if (game_text_encoding_forced && is_message_section) {
+			if (preferred) {
+				trace_text_conversion_sample("ain-forced", str, game_str_encoding, preferred);
+				return preferred;
+			}
+			warn_raw_text_passthrough("ain-forced", str, game_str_encoding);
+			return strdup(str);
+		}
+	}
+
+	utf8 = detect_best_game_text_to_utf8(str, &detected_encoding, scores);
+	if (!utf8) {
+		if (preferred) {
+			trace_text_conversion_sample("ain-preferred-fallback", str, game_str_encoding, preferred);
+			return preferred;
+		}
+		warn_raw_text_passthrough("ain-detected", str, detected_encoding);
+		return strdup(str);
+	}
+
+	if (preferred) {
+		int detected_score = scores[detected_encoding];
+		if (detected_encoding == game_str_encoding
+				|| (preferred_score >= 0 && detected_score < preferred_score + 8)) {
+			free(utf8);
+			trace_text_conversion_sample(game_text_encoding_forced ? "ain-forced-preferred" : "ain-preferred",
+					str,
+					game_str_encoding,
+					preferred);
+			return preferred;
+		}
+		free(preferred);
+	}
+
+	update_auto_game_text_detection(scores);
+	trace_text_conversion_sample("ain-detected", str, detected_encoding, utf8);
+	return utf8;
+}
+
+static char *resource_text_to_utf8(const char *text)
+{
+	enum game_text_encoding preferred_encoding =
+		game_text_encoding_forced ? GAME_TEXT_ENCODING_CP932 : game_str_encoding;
+	int scores[GAME_TEXT_ENCODING_NR];
+	enum game_text_encoding detected_encoding = GAME_TEXT_ENCODING_AUTO;
+	char *best;
+	char *preferred = NULL;
+	int preferred_score = INT_MIN;
+
+	if (!text)
+		return NULL;
+	if (is_ascii_text(text))
+		return strdup(text);
+	if (preferred_encoding == GAME_TEXT_ENCODING_AUTO && is_valid_utf8_text(text))
+		return strdup(text);
+
+	if (preferred_encoding != GAME_TEXT_ENCODING_AUTO) {
+		preferred = decode_multibyte_to_utf8(text, preferred_encoding);
+		if (preferred)
+			preferred_score = score_utf8_string(preferred);
+	}
+
+	best = detect_best_game_text_to_utf8(text, &detected_encoding, scores);
+	if (!best) {
+		if (preferred) {
+			trace_text_conversion_sample("resource-preferred-fallback", text, preferred_encoding, preferred);
+			return preferred;
+		}
+		warn_raw_text_passthrough("resource", text, preferred_encoding);
+		return strdup(text);
+	}
+
+	if (preferred) {
+		int detected_score = scores[detected_encoding];
+		if (detected_encoding == preferred_encoding
+				|| (preferred_score >= 0 && detected_score < preferred_score + 8)) {
+			free(best);
+			trace_text_conversion_sample("resource-preferred", text, preferred_encoding, preferred);
+			return preferred;
+		}
+		free(preferred);
+	}
+
+	trace_text_conversion_sample("resource-detected", text, detected_encoding, best);
+	return best;
+}
+
+static char *normalize_ini_game_text(const char *text)
+{
+	if (!text)
+		return NULL;
+	if (is_ascii_text(text))
+		return strdup(text);
+	if (!game_text_encoding_forced
+			&& game_str_encoding == GAME_TEXT_ENCODING_AUTO
+			&& is_valid_utf8_text(text))
+		return strdup(text);
+
+	if (game_str_encoding != GAME_TEXT_ENCODING_AUTO) {
+		char *converted = decode_multibyte_to_utf8(text, game_str_encoding);
+		if (converted) {
+			trace_text_conversion_sample("ini-preferred", text, game_str_encoding, converted);
+			return converted;
+		}
+		warn_raw_text_passthrough("ini", text, game_str_encoding);
+	}
+
+	char *best = detect_best_game_text_to_utf8(text, NULL, NULL);
+	if (best)
+		trace_text_conversion_sample("ini-detected", text, game_str_encoding, best);
+	return best ? best : strdup(text);
+}
+
+static char *utf8_to_game_text(const char *text)
+{
+	return text ? strdup(text) : NULL;
+}
+
+char *xsystem4_utf8_to_ain_text(const char *text)
+{
+	return text ? strdup(text) : NULL;
+}
+
+char *xsystem4_game_text_to_utf8(const char *text)
+{
+	return game_text_to_utf8(text);
+}
+
+char *xsystem4_resource_text_to_utf8(const char *text)
+{
+	return resource_text_to_utf8(text);
+}
+
+char *xsystem4_resource_lookup_alias(const char *text)
+{
+	char *encoded;
+	char *alias;
+
+	if (!text || !*text || !game_text_encoding_forced
+			|| game_str_encoding == GAME_TEXT_ENCODING_AUTO
+			|| game_str_encoding == GAME_TEXT_ENCODING_CP932)
+		return NULL;
+
+	encoded = encode_utf8_to_multibyte(text, game_str_encoding);
+	if (!encoded)
+		return NULL;
+	alias = decode_multibyte_to_utf8(encoded, GAME_TEXT_ENCODING_CP932);
+	free(encoded);
+	if (!alias || !strcmp(alias, text)) {
+		free(alias);
+		return NULL;
+	}
+	return alias;
+}
+
+static char *resolve_ini_ain_filename(const char *game_dir, const char *raw_name)
+{
+	if (!raw_name)
+		return NULL;
+	if (game_text_encoding_forced) {
+		char *utf8_name = decode_multibyte_to_utf8(raw_name, game_str_encoding);
+		if (utf8_name) {
+			char *resolved = utf8_to_game_text(utf8_name);
+			free(utf8_name);
+			return resolved;
+		}
+	}
+	if (is_ascii_text(raw_name))
+		return normalize_ini_game_text(raw_name);
+
+	for (size_t i = 0; i < sizeof(game_text_candidate_encodings) / sizeof(game_text_candidate_encodings[0]); i++) {
+		enum game_text_encoding encoding = game_text_candidate_encodings[i];
+		char *utf8_name = decode_multibyte_to_utf8(raw_name, encoding);
+		if (!utf8_name)
+			continue;
+
+		char *candidate = path_join(game_dir, utf8_name);
+		bool exists = file_exists(candidate);
+		free(candidate);
+		if (exists) {
+			lock_game_text_encoding(encoding, "AIN filename");
+			#ifdef __OHOS__
+			SDL_Log("[xsystem4_text] AIN filename encoding detected as %s", game_text_encoding_label(encoding));
+			#endif
+			char *resolved = utf8_to_game_text(utf8_name);
+			free(utf8_name);
+			return resolved;
+		}
+		free(utf8_name);
+	}
+
+	return normalize_ini_game_text(raw_name);
+}
 #else
 static char *normalize_ini_game_text(const char *text)
 {
@@ -279,12 +1437,52 @@ static char *utf8_to_game_text(const char *text)
 	return text ? utf2sjis(text, strlen(text)) : NULL;
 }
 
+char *xsystem4_utf8_to_ain_text(const char *text)
+{
+	return utf8_to_game_text(text);
+}
+
+char *xsystem4_game_text_to_utf8(const char *text)
+{
+	return text ? sjis2utf(text, strlen(text)) : NULL;
+}
+
+char *xsystem4_resource_text_to_utf8(const char *text)
+{
+	return xsystem4_game_text_to_utf8(text);
+}
+
+char *xsystem4_resource_lookup_alias(const char *text)
+{
+	(void)text;
+	return NULL;
+}
+
 static char *resolve_ini_ain_filename(const char *game_dir, const char *raw_name)
 {
 	(void)game_dir;
 	return normalize_ini_game_text(raw_name);
 }
 #endif
+
+struct string *xsystem4_cstring_to_string(const char *text, size_t len)
+{
+	if (!text || !len)
+		return make_string("", 0);
+
+	char *raw = xmalloc(len + 1);
+	memcpy(raw, text, len);
+	raw[len] = '\0';
+
+	char *normalized = normalize_ini_game_text(raw);
+	free(raw);
+	if (!normalized)
+		return make_string("", 0);
+
+	struct string *s = make_string(normalized, strlen(normalized));
+	free(normalized);
+	return s;
+}
 
 static struct string *ini_string(struct ini_entry *entry)
 {
@@ -344,6 +1542,12 @@ static bool read_config(const char *path)
 		return false;
 
 	for (int i = 0; i < ini_size; i++) {
+		if (!strcmp(ini[i].name->text, "TextEncoding")) {
+			configure_game_text_encoding(ini_string(&ini[i])->text, path);
+		}
+	}
+
+	for (int i = 0; i < ini_size; i++) {
 		if (!strcmp(ini[i].name->text, "GameName")) {
 			config.game_name = normalize_ini_game_text(ini_string(&ini[i])->text);
 		} else if (!strcmp(ini[i].name->text, "BootName")) {
@@ -377,6 +1581,12 @@ static void read_user_config_file(const char *path)
 	struct ini_entry *ini = ini_parse(path, &ini_size);
 	if (!ini)
 		return;
+
+	for (int i = 0; i < ini_size; i++) {
+		if (!strcmp(ini[i].name->text, "text-encoding")) {
+			configure_game_text_encoding(ini_string(&ini[i])->text, path);
+		}
+	}
 
 	for (int i = 0; i < ini_size; i++) {
 		if (!strcmp(ini[i].name->text, "font-mincho")) {
@@ -487,6 +1697,14 @@ static char *get_save_path(const char *dir_name)
 	 * issues with non-ASCII characters in the home path. */
 	char *save_dir = xmalloc(strlen(config.game_dir) + 1 + strlen(dir_name) + 1);
 	strcpy(save_dir, config.game_dir);
+	strcat(save_dir, "/");
+	strcat(save_dir, dir_name);
+	return save_dir;
+#elif defined(XSYSTEM4_HOST_UTF8)
+	char *save_dir = xmalloc(strlen(config.home_dir) + 1 + strlen(config.game_name) + 1 + strlen(dir_name) + 1);
+	strcpy(save_dir, config.home_dir);
+	strcat(save_dir, "/");
+	strcat(save_dir, config.game_name);
 	strcat(save_dir, "/");
 	strcat(save_dir, dir_name);
 	return save_dir;
@@ -650,14 +1868,87 @@ enum {
 
 static void error_handler(const char *msg)
 {
+	fprintf(stderr, "[error_handler] %s\n", msg);
+	fflush(stderr);
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "xsystem4", msg, NULL);
 }
 
+#ifdef _WIN32
+static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ep)
+{
+	DWORD code = ep->ExceptionRecord->ExceptionCode;
+	PVOID addr = ep->ExceptionRecord->ExceptionAddress;
+	fprintf(stderr, "\n*** CRASH: ExceptionCode=0x%08lX at address %p ***\n", code, addr);
+
+	/* Print the name of the module containing the crash address */
+	HMODULE hMods[512];
+	HANDLE hProc = GetCurrentProcess();
+	DWORD cbNeeded;
+	if (EnumProcessModules(hProc, hMods, sizeof(hMods), &cbNeeded)) {
+		DWORD nMods = cbNeeded / sizeof(HMODULE);
+		for (DWORD i = 0; i < nMods; i++) {
+			MODULEINFO mi;
+			if (GetModuleInformation(hProc, hMods[i], &mi, sizeof(mi))) {
+				LPCVOID base = mi.lpBaseOfDll;
+				LPCVOID end  = (const char *)mi.lpBaseOfDll + mi.SizeOfImage;
+				if (addr >= base && addr < end) {
+					char name[MAX_PATH] = "<unknown>";
+					GetModuleFileNameA(hMods[i], name, MAX_PATH);
+					fprintf(stderr, "  in module: %s (base=%p)\n", name, base);
+					break;
+				}
+			}
+		}
+	}
+
+	/* Walk the call stack using StackWalk64 */
+	CONTEXT ctx = *ep->ContextRecord;
+	STACKFRAME64 sf;
+	memset(&sf, 0, sizeof(sf));
+#ifdef _M_X64
+	sf.AddrPC.Offset    = ctx.Rip;
+	sf.AddrStack.Offset = ctx.Rsp;
+	sf.AddrFrame.Offset = ctx.Rbp;
+#else
+	sf.AddrPC.Offset    = ctx.Eip;
+	sf.AddrStack.Offset = ctx.Esp;
+	sf.AddrFrame.Offset = ctx.Ebp;
+#endif
+	sf.AddrPC.Mode    = AddrModeFlat;
+	sf.AddrStack.Mode = AddrModeFlat;
+	sf.AddrFrame.Mode = AddrModeFlat;
+	SymInitialize(hProc, NULL, TRUE);
+	fprintf(stderr, "  Stack trace:\n");
+	for (int frame = 0; frame < 20; frame++) {
+		if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, hProc, GetCurrentThread(),
+		                 &sf, &ctx, NULL, SymFunctionTableAccess64,
+		                 SymGetModuleBase64, NULL))
+			break;
+		if (sf.AddrPC.Offset == 0)
+			break;
+		char buf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)];
+		PSYMBOL_INFO sym = (PSYMBOL_INFO)buf;
+		sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+		sym->MaxNameLen   = MAX_SYM_NAME;
+		DWORD64 disp = 0;
+		if (SymFromAddr(hProc, sf.AddrPC.Offset, &disp, sym))
+			fprintf(stderr, "    #%d 0x%016llX  %s+0x%llX\n", frame, sf.AddrPC.Offset, sym->Name, disp);
+		else
+			fprintf(stderr, "    #%d 0x%016llX  ???\n", frame, sf.AddrPC.Offset);
+	}
+
+	fflush(stderr);
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 int main(int argc, char *argv[])
 {
-	sys_error_handler = error_handler;
+	if (!sys_error_handler)
+		sys_error_handler = error_handler;
 
 #ifdef _WIN32
+	SetUnhandledExceptionFilter(crash_handler);
 	char **utf8_argv = normalize_argv_utf8(&argc);
 	if (utf8_argv)
 		argv = utf8_argv;
@@ -779,6 +2070,8 @@ int main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
+	apply_env_game_text_encoding_override();
+
 	if (argc < 1) {
 		if (!config_init_with_dir(".")) {
 			if (!config_init_with_dir(".."))
@@ -822,7 +2115,7 @@ int main(int argc, char *argv[])
 		config.save_dir = strdup(savedir);
 	}
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
 	if (!(ain = ain_open_conv(ainfile, game_text_to_utf8, &err))) {
 #else
 	if (!(ain = ain_open(ainfile, &err))) {
@@ -842,5 +2135,5 @@ int main(int argc, char *argv[])
 		set_msgskip_delay(ain, config.msgskip_delay);
 	asset_manager_init();
 	dbg_init(debug_info_path);
-	sys_exit(vm_execute_ain(ain));
+	return vm_execute_ain(ain);
 }

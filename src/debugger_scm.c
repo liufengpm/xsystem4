@@ -18,6 +18,7 @@
 
 #include <stdio.h>
 #include <assert.h>
+#include <SDL.h>
 #include <chibi/eval.h>
 
 #include "system4/ain.h"
@@ -31,6 +32,18 @@
 #include "vm/page.h"
 
 #include "debugger.h"
+
+#ifdef __OHOS__
+static void dbg_scm_load_script(const char *path)
+{
+	size_t script_size = 0;
+	char *script = SDL_LoadFile(path, &script_size);
+	if (!script)
+		ERROR("Failed to load debugger script: %s", path);
+	sexp_eval_string(dbg_ctx, script, (int)script_size, NULL);
+	SDL_free(script);
+}
+#endif
 
 struct variable {
 	enum ain_data_type data_type;
@@ -208,8 +221,17 @@ void dbg_scm_init(void)
 
 	if (file_exists("./debugger.scm"))
 		sexp_eval_string(dbg_ctx, "(load \"./debugger.scm\")", -1, NULL);
-	else
-		sexp_eval_string(dbg_ctx, "(load \"" XSYS4_DATA_DIR "/debugger.scm\")", -1, NULL);
+	else {
+		char *debugger_path = xsystem4_data_path("debugger.scm");
+#ifdef __OHOS__
+		dbg_scm_load_script(debugger_path);
+#else
+		char expr[PATH_MAX + 32];
+		snprintf(expr, sizeof(expr), "(load \"%s\")", debugger_path);
+		sexp_eval_string(dbg_ctx, expr, -1, NULL);
+#endif
+		free(debugger_path);
+	}
 }
 
 void dbg_scm_fini(void)

@@ -14,10 +14,41 @@
  * along with this program; if not, see <http://gnu.org/licenses/>.
  */
 
-#include "hll.h"
+#include <string.h>
 
-HLL_WARN_UNIMPLEMENTED(1, int, DrawPluginManager, Load, struct string *plugin_name);
-HLL_WARN_UNIMPLEMENTED(1, int, DrawPluginManager, IsLoad, struct string *plugin_name);
+#include "hll.h"
+#include "system4/string.h"
+
+static char **loaded_plugins;
+static int nr_loaded_plugins;
+
+static int draw_plugin_index(const char *plugin_name)
+{
+	for (int i = 0; i < nr_loaded_plugins; i++) {
+		if (!strcmp(loaded_plugins[i], plugin_name))
+			return i;
+	}
+	return -1;
+}
+
+static int DrawPluginManager_Load(struct string *plugin_name)
+{
+	if (!plugin_name || !plugin_name->text || !*plugin_name->text)
+		return 0;
+	if (draw_plugin_index(plugin_name->text) >= 0)
+		return 1;
+	loaded_plugins = xrealloc(loaded_plugins, sizeof(char *) * (nr_loaded_plugins + 1));
+	loaded_plugins[nr_loaded_plugins++] = strdup(plugin_name->text);
+	NOTICE("DrawPluginManager loaded plugin: %s", plugin_name->text);
+	return 1;
+}
+
+static int DrawPluginManager_IsLoad(struct string *plugin_name)
+{
+	if (!plugin_name || !plugin_name->text || !*plugin_name->text)
+		return 0;
+	return draw_plugin_index(plugin_name->text) >= 0;
+}
 
 HLL_LIBRARY(DrawPluginManager,
 	    HLL_EXPORT(Load, DrawPluginManager_Load),

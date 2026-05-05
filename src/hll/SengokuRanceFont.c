@@ -333,8 +333,8 @@ static float sp_text_draw(struct sact_sprite *sp, struct sr_text_properties *tp,
 
 	// save last char code
 	int last_char = -1;
-	for (char *p = text->text; *p; p = sjis_skip_char(p)) {
-		last_char = sjis_code(p);
+	for (char *p = text->text; *p; p = vm_skip_char(p)) {
+		last_char = (int)vm_char_code(p);
 	}
 	tp->last_char = last_char;
 

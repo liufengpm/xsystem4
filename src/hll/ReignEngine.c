@@ -24,6 +24,7 @@
 #include "hll.h"
 #include "reign.h"
 #include "vm/page.h"
+#include "xsystem4.h"
 
 #define RE_MAX_PLUGINS 2
 
@@ -715,7 +716,7 @@ static void ReignEngine_GetEffectObjectName(int plugin, int instance, int object
 	if (*name)
 		free_string(*name);
 	const char *s = RE_particle_get_name(get_particle(plugin, instance, object));
-	*name = s ? cstr_to_string(s) : string_ref(&EMPTY_STRING);
+	*name = s ? xsystem4_cstring_to_string(s, strlen(s)) : string_ref(&EMPTY_STRING);
 }
 
 static int ReignEngine_GetEffectNumofObjectPos(int plugin, int instance, int object)
@@ -753,7 +754,7 @@ static void ReignEngine_GetEffectObjectTexture(int plugin, int instance, int obj
 	if (*name)
 		free_string(*name);
 	const char *s = RE_particle_get_texture(get_particle(plugin, instance, object), texture);
-	*name = s ? cstr_to_string(s) : string_ref(&EMPTY_STRING);
+	*name = s ? xsystem4_cstring_to_string(s, strlen(s)) : string_ref(&EMPTY_STRING);
 }
 
 static bool ReignEngine_GetEffectObjectSize(int plugin, int instance, int object, float *begin_size, float *end_size)
@@ -831,7 +832,7 @@ static void ReignEngine_GetEffectObjectPolygonName(int plugin, int instance, int
 	if (*result)
 		free_string(*result);
 	const char *s = RE_particle_get_polygon_name(get_particle(plugin, instance, object));
-	*result = s ? cstr_to_string(s) : string_ref(&EMPTY_STRING);
+	*result = s ? xsystem4_cstring_to_string(s, strlen(s)) : string_ref(&EMPTY_STRING);
 }
 
 static int ReignEngine_GetEffectNumofObjectParticle(int plugin, int instance, int object)

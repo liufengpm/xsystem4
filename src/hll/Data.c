@@ -84,8 +84,9 @@ static void read_struct(struct page *page)
 			break;
 		case AIN_STRING:
 			{
-				struct string *s = cstr_to_string(buffer_strdata(&reader));
-				buffer_skip(&reader, s->size + 1);
+				size_t raw_len = strlen(buffer_strdata(&reader));
+				struct string *s = xsystem4_cstring_to_string(buffer_strdata(&reader), raw_len);
+				buffer_skip(&reader, raw_len + 1);
 				val = vm_int(heap_alloc_string(s));
 			}
 			break;

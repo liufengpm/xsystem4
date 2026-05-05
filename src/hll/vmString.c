@@ -25,7 +25,7 @@
 
 static int vmString_GetLength(struct string *string)
 {
-	return sjis_count_char(string->text);
+	return vm_count_char(string->text);
 }
 
 static int vmString_GetLengthA(struct string *string)
@@ -62,7 +62,7 @@ static struct string *vmString_IntToStringExA(int num, int figure, int zero)
 
 static int vmString_StringToInt(struct string *string)
 {
-	return atoi(string->text);
+	return string_to_integer(string);
 }
 
 //struct string *vmString_FloatToString(float fNum);

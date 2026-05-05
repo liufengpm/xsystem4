@@ -92,12 +92,14 @@ static void prepare_movie_shader(struct gfx_render_job *job, void *data)
 
 static void load_movie_shader()
 {
+	SDL_Log("[xsystem4_movie] loading shader shaders/movie.f.glsl");
 	gfx_load_shader(&movie_shader, "shaders/render.v.glsl", "shaders/movie.f.glsl");
 	glUseProgram(movie_shader.program);
 	glUniform1i(glGetUniformLocation(movie_shader.program, "texture_y"), 0);
 	glUniform1i(glGetUniformLocation(movie_shader.program, "texture_cb"), 1);
 	glUniform1i(glGetUniformLocation(movie_shader.program, "texture_cr"), 2);
 	movie_shader.prepare = prepare_movie_shader;
+	SDL_Log("[xsystem4_movie] shader ready, program=%u", movie_shader.program);
 }
 
 static void update_texture(GLuint unit, GLuint texture, plm_plane_t *plane)
@@ -118,6 +120,7 @@ struct movie_context *movie_load(const char *filename)
 		movie_free(mc);
 		return NULL;
 	}
+	SDL_Log("[xsystem4_movie] opening movie %s", path);
 	FILE *fp = file_open_utf8(path, "rb");
 	if (!fp) {
 		WARNING("%s: %s", path, strerror(errno));
@@ -132,6 +135,7 @@ struct movie_context *movie_load(const char *filename)
 		movie_free(mc);
 		return NULL;
 	}
+	SDL_Log("[xsystem4_movie] movie headers parsed for %s", path);
 	free(path);
 
 	if (!movie_shader.program)
@@ -156,6 +160,14 @@ void movie_free(struct movie_context *mc)
 {
 	if (mc->voice >= 0)
 		mixer_stream_stop(mc->voice);
+
+	/* Synchronize with the audio callback thread. If audio_callback() already
+	 * returned STS_STREAM_COMPLETE and set mc->voice=-1, mixer_stream_stop was
+	 * skipped above, but the SDL audio thread may still be inside its current
+	 * mix cycle accessing mc->sts_stream. Lock/unlock the audio device to act
+	 * as a barrier, ensuring no audio callback is running before we free mc. */
+	mixer_lock_audio();
+	mixer_unlock_audio();
 
 	if (mc->plm)
 		plm_destroy(mc->plm);

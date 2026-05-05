@@ -24,17 +24,24 @@
 #include "xsystem4.h"
 #include "parts_internal.h"
 
-static int extract_sjis_char(const char *src, char *dst)
+static int extract_text_char(const char *src, char *dst, bool sjis)
 {
-	if (SJIS_2BYTE(*src)) {
+	if (sjis) {
+		if (SJIS_2BYTE(*src)) {
+			dst[0] = src[0];
+			dst[1] = src[1];
+			dst[2] = '\0';
+			return 2;
+		}
 		dst[0] = src[0];
-		dst[1] = src[1];
-		dst[2] = '\0';
-		return 2;
+		dst[1] = '\0';
+		return 1;
 	}
-	dst[0] = src[0];
-	dst[1] = '\0';
-	return 1;
+
+	int len = vm_char_size(src);
+	memcpy(dst, src, len);
+	dst[len] = '\0';
+	return len;
 }
 
 struct string *parts_text_line_get(struct parts_text_line *line)
@@ -81,9 +88,10 @@ static const char *parts_text_append_char(struct parts_text *t, const char *str)
 	line->chars = xrealloc_array(line->chars, line->nr_chars, line->nr_chars + 1,
 			sizeof(struct parts_text_char));
 	struct parts_text_char *ch = &line->chars[line->nr_chars++];
+	struct font_size *font_size = gfx_font_get_size(t->ts.face, t->ts.size);
 
 	ch->off = text_style_offset(&t->ts);
-	int len = extract_sjis_char(str, ch->ch);
+	int len = extract_text_char(str, ch->ch, font_size->font->charmap == CHARMAP_SJIS);
 	int width = ceilf(text_style_width(&t->ts, ch->ch));
 	int height = text_style_height(&t->ts);
 	gfx_init_texture_rgba(&ch->t, width, height, (SDL_Color){0,0,0,0});

@@ -185,8 +185,9 @@ static bool load_ts3m_data(enum ts3m_section section, int no)
 
 static int32_t read_cstring(struct buffer *buf)
 {
-	struct string *s = cstr_to_string(buffer_strdata(buf));
-	buffer_skip(buf, s->size + 1);
+	size_t raw_len = strlen(buffer_strdata(buf));
+	struct string *s = xsystem4_cstring_to_string(buffer_strdata(buf), raw_len);
+	buffer_skip(buf, raw_len + 1);
 	return heap_alloc_string(s);
 }
 

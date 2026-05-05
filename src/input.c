@@ -14,7 +14,9 @@
  * along with this program; if not, see <http://gnu.org/licenses/>.
  */
 
+#include <math.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <time.h>
 #include <SDL.h>
 #include "system4.h"
@@ -708,6 +710,7 @@ void handle_events(void)
 					scroll_gesture_y = e.mgesture.y;
 				}
 			}
+			break;
 		case SDL_CONTROLLERDEVICEADDED:
 			if (e.cdevice.which < MAX_CONTROLLERS)
 				controllers[e.cdevice.which] = SDL_GameControllerOpen(e.cdevice.which);

@@ -93,8 +93,14 @@ struct text_style text_sprite_ts = {
 	.font_size = NULL,
 };
 
-static int extract_sjis_char(char *src, char *dst)
+static int extract_textsprite_char(const char *src, char *dst)
 {
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	int len = vm_char_size(src);
+	memcpy(dst, src, len);
+	dst[len] = '\0';
+	return len;
+#else
 	if (SJIS_2BYTE(*src)) {
 		dst[0] = src[0];
 		dst[1] = src[1];
@@ -104,6 +110,7 @@ static int extract_sjis_char(char *src, char *dst)
 	dst[0] = src[0];
 	dst[1] = '\0';
 	return 1;
+#endif
 }
 
 bool StoatSpriteEngine_SP_SetTextSprite(int sp_no, struct string *text)
@@ -111,8 +118,8 @@ bool StoatSpriteEngine_SP_SetTextSprite(int sp_no, struct string *text)
 	if (text->size < 1)
 		return false;
 
-	char s[3];
-	extract_sjis_char(text->text, s);
+	char s[5];
+	extract_textsprite_char(text->text, s);
 	int w = ceilf(text_style_width(&text_sprite_ts, s));
 	int h = text_sprite_ts.size;
 	// XXX: System40.exe lies about the height of half-width characters.
@@ -188,8 +195,16 @@ float StoatSpriteEngine_FPS_Get(void)
 HLL_WARN_UNIMPLEMENTED( , void, StoatSpriteEngine, VIEW_SetOffsetPos, int x, int y);
 
 static bool keep_previous_view = true;
-HLL_WARN_UNIMPLEMENTED((keep_previous_view = on, true), bool, StoatSpriteEngine, KeepPreviousView_SetMode, bool on);
-HLL_WARN_UNIMPLEMENTED(keep_previous_view, bool, StoatSpriteEngine, KeepPreviousView_GetMode);
+static bool StoatSpriteEngine_KeepPreviousView_SetMode(bool on)
+{
+	keep_previous_view = on;
+	return true;
+}
+
+static bool StoatSpriteEngine_KeepPreviousView_GetMode(void)
+{
+	return keep_previous_view;
+}
 
 /*
  * NOTE: The multisprite "type" alters the behavior of the multisprite functions.

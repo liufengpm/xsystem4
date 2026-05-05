@@ -36,7 +36,7 @@ static bool ACXLoader_Load(struct string *filename)
 {
 	int error = ACX_SUCCESS;
 	char *path = gamedir_path(filename->text);
-	acx = acx_load(path, &error);
+	acx = acx_load_conv(path, &error, xsystem4_cstring_to_string);
 
 	// XXX: Fix for games (e.g. Tsuma Shibori) that shipped with incorrectly
 	//      cased file names
@@ -45,7 +45,7 @@ static bool ACXLoader_Load(struct string *filename)
 		if (ipath) {
 			free(path);
 			path = ipath;
-			acx = acx_load(path, &error);
+			acx = acx_load_conv(path, &error, xsystem4_cstring_to_string);
 		}
 	}
 

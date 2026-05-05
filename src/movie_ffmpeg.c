@@ -24,6 +24,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/fifo.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
 
 #include "system4.h"
@@ -174,24 +175,49 @@ static int audio_callback(sts_mixer_sample_t *sample, void *data)
 		mc->voice = -1;
 		return STS_STREAM_COMPLETE;
 	}
-	const int nr_channels = 2;
-	unsigned samples = mc->audio.frame->linesize[0] / mc->bytes_per_sample;
-	if (samples * nr_channels != sample->length) {
+	const int output_channels = 2;
+	const int source_channels = mc->audio.frame->ch_layout.nb_channels > 0
+		? mc->audio.frame->ch_layout.nb_channels
+		: mc->audio.ctx->ch_layout.nb_channels;
+	const enum AVSampleFormat frame_fmt = mc->audio.frame->format;
+	const bool planar = av_sample_fmt_is_planar(frame_fmt);
+	// Derive bytes-per-sample from the actual decoded frame format, not from
+	// codec_ctx->sample_fmt which may differ for some decoders (e.g. vorbis).
+	const int frame_bps = av_get_bytes_per_sample(av_get_packed_sample_fmt(frame_fmt));
+	unsigned samples = mc->audio.frame->nb_samples;
+	if (frame_bps != mc->bytes_per_sample || samples * output_channels != sample->length) {
 		free(sample->data);
-		sample->length = samples * nr_channels;
+		mc->bytes_per_sample = frame_bps;
+		sample->length = samples * output_channels;
 		sample->data = xmalloc(sample->length * mc->bytes_per_sample);
 	}
-	// Interleave.
-	uint8_t *l = mc->audio.frame->data[0];
-	uint8_t *r = mc->audio.frame->data[mc->audio.ctx->ch_layout.nb_channels > 1 ? 1 : 0];
+
 	uint8_t *out = sample->data;
-	for (unsigned i = 0; i < samples; i++) {
-		memcpy(out, l, mc->bytes_per_sample);
-		out += mc->bytes_per_sample;
-		l += mc->bytes_per_sample;
-		memcpy(out, r, mc->bytes_per_sample);
-		out += mc->bytes_per_sample;
-		r += mc->bytes_per_sample;
+	if (planar) {
+		const uint8_t *l = mc->audio.frame->data[0];
+		const uint8_t *r = mc->audio.frame->data[source_channels > 1 ? 1 : 0];
+		for (unsigned i = 0; i < samples; i++) {
+			memcpy(out, l, mc->bytes_per_sample);
+			out += mc->bytes_per_sample;
+			l += mc->bytes_per_sample;
+			memcpy(out, r, mc->bytes_per_sample);
+			out += mc->bytes_per_sample;
+			r += mc->bytes_per_sample;
+		}
+	} else {
+		const uint8_t *in = mc->audio.frame->data[0];
+		const int packed_channels = source_channels > 0 ? source_channels : 1;
+		for (unsigned i = 0; i < samples; i++) {
+			memcpy(out, in, mc->bytes_per_sample);
+			out += mc->bytes_per_sample;
+			if (source_channels > 1) {
+				memcpy(out, in + mc->bytes_per_sample, mc->bytes_per_sample);
+			} else {
+				memcpy(out, in, mc->bytes_per_sample);
+			}
+			out += mc->bytes_per_sample;
+			in += (size_t)packed_channels * mc->bytes_per_sample;
+		}
 	}
 
 	// Update the timestamp.
@@ -221,7 +247,14 @@ struct movie_context *movie_load(const char *filename)
 	}
 	free(path);
 
-	if ((ret = avformat_find_stream_info(mc->format_ctx, NULL)) < 0) {
+	/* Limit FFmpeg internal probe threads to 1 to avoid concurrent jemalloc
+	 * races on HarmonyOS/ARM64 (multiple threads calling malloc/free
+	 * simultaneously inside avformat_find_stream_info). */
+	AVDictionary *probe_opts = NULL;
+	av_dict_set_int(&probe_opts, "threads", 1, 0);
+	ret = avformat_find_stream_info(mc->format_ctx, &probe_opts);
+	av_dict_free(&probe_opts);
+	if (ret < 0) {
 		WARNING("avformat_find_stream_info failed: %d", ret);
 		movie_free(mc);
 		return NULL;
@@ -269,8 +302,18 @@ void movie_free(struct movie_context *mc)
 {
 	if (mc->voice >= 0)
 		mixer_stream_stop(mc->voice);
-	if (mc->sts_stream.sample.data)
+	/* Hold the audio lock while nulling out the sample buffer.
+	 * This closes the race on HarmonyOS (jemalloc) where audio_callback
+	 * sets mc->voice = -1 and returns STS_STREAM_COMPLETE, but
+	 * sts_mixer_mix_audio hasn't yet called sts_mixer_stop_voice.
+	 * Holding the lock here ensures the SDL audio callback has fully
+	 * returned before we touch any shared state. */
+	mixer_lock_audio();
+	if (mc->sts_stream.sample.data) {
 		free(mc->sts_stream.sample.data);
+		mc->sts_stream.sample.data = NULL;
+	}
+	mixer_unlock_audio();
 
 	if (mc->format_ctx)
 		avformat_close_input(&mc->format_ctx);
@@ -303,14 +346,17 @@ bool movie_play(struct movie_context *mc)
 	mc->sts_stream.callback = audio_callback;
 	mc->sts_stream.sample.frequency = mc->audio.ctx->sample_rate;
 	switch (mc->audio.ctx->sample_fmt) {
+	case AV_SAMPLE_FMT_S16:
 	case AV_SAMPLE_FMT_S16P:
 		mc->sts_stream.sample.audio_format = STS_MIXER_SAMPLE_FORMAT_16;
 		mc->bytes_per_sample = 2;
 		break;
+	case AV_SAMPLE_FMT_S32:
 	case AV_SAMPLE_FMT_S32P:
 		mc->sts_stream.sample.audio_format = STS_MIXER_SAMPLE_FORMAT_32;
 		mc->bytes_per_sample = 4;
 		break;
+	case AV_SAMPLE_FMT_FLT:
 	case AV_SAMPLE_FMT_FLTP:
 		mc->sts_stream.sample.audio_format = STS_MIXER_SAMPLE_FORMAT_FLOAT;
 		mc->bytes_per_sample = 4;

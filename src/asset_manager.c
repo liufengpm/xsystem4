@@ -79,6 +79,30 @@ struct asset_manager_afa {
 
 static struct asset_manager *assets[ASSET_TYPE_MAX] = {0};
 
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+static char *asset_manager_convert_cstring(const char *text)
+{
+	char *utf8 = xsystem4_resource_text_to_utf8(text);
+	return utf8 ? utf8 : strdup(text);
+}
+
+static struct string *asset_manager_convert_string(const char *text, size_t len)
+{
+	char *raw = xmalloc(len + 1);
+	memcpy(raw, text, len);
+	raw[len] = '\0';
+
+	char *utf8 = xsystem4_resource_text_to_utf8(raw);
+	free(raw);
+	if (!utf8)
+		return make_string(text, len);
+
+	struct string *out = cstr_to_string(utf8);
+	free(utf8);
+	return out;
+}
+#endif
+
 bool asset_manager_load_archive(enum asset_type type, const char *archive_name)
 {
 	if (!assets[type])
@@ -97,11 +121,23 @@ bool asset_exists(enum asset_type type, int id)
 
 bool asset_exists_by_name(enum asset_type type, const char *name, int *id_out)
 {
+	bool exists;
+	char *alias;
+
 	if (!assets[type])
 		return false;
 	if (!assets[type]->exists_by_name)
 		ERROR("exists_by_name not supported on this archive type");
-	return assets[type]->exists_by_name(assets[type], name, id_out);
+	exists = assets[type]->exists_by_name(assets[type], name, id_out);
+	if (exists)
+		return true;
+
+	alias = xsystem4_resource_lookup_alias(name);
+	if (!alias)
+		return false;
+	exists = assets[type]->exists_by_name(assets[type], alias, id_out);
+	free(alias);
+	return exists;
 }
 
 struct archive_data *asset_get(enum asset_type type, int id)
@@ -113,11 +149,23 @@ struct archive_data *asset_get(enum asset_type type, int id)
 
 struct archive_data *asset_get_by_name(enum asset_type type, const char *name, int *id_out)
 {
+	struct archive_data *data;
+	char *alias;
+
 	if (!assets[type])
 		return NULL;
 	if (!assets[type]->get_by_name)
 		ERROR("get_by_name not supported on this archive type");
-	return assets[type]->get_by_name(assets[type], name, id_out);
+	data = assets[type]->get_by_name(assets[type], name, id_out);
+	if (data)
+		return data;
+
+	alias = xsystem4_resource_lookup_alias(name);
+	if (!alias)
+		return NULL;
+	data = assets[type]->get_by_name(assets[type], alias, id_out);
+	free(alias);
+	return data;
 }
 
 struct cg *asset_cg_load(int id)
@@ -182,10 +230,22 @@ static bool afa_load_archive(struct asset_manager *_manager, const char *name)
 	snprintf(path, PATH_MAX, "%s.afa", name);
 
 	int error;
+
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	struct afa_archive *ar = afa_open_conv(path, MMAP_IF_64BIT, &error,
+			asset_manager_convert_string);
+#else
 	struct afa_archive *ar = afa_open(path, MMAP_IF_64BIT, &error);
+#endif
 	if (!ar) {
 		snprintf(path, PATH_MAX, "%s.AFA", name);
+
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+		ar = afa_open_conv(path, MMAP_IF_64BIT, &error,
+				asset_manager_convert_string);
+#else
 		ar = afa_open(path, MMAP_IF_64BIT, &error);
+#endif
 		if (!ar) {
 			WARNING("Failed to open archive: %s", display_utf0(path));
 			return false;
@@ -271,7 +331,13 @@ static void ald_init(enum asset_type type, char **files, int count)
 		WARNING("Multiple asset archives for type %s", asset_strtype(type));
 
 	int error;
+
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	struct archive *ar = ald_open_conv(files, count, MMAP_IF_64BIT, &error,
+			asset_manager_convert_cstring);
+#else
 	struct archive *ar = ald_open(files, count, MMAP_IF_64BIT, &error);
+#endif
 	if (!ar)
 		ERROR("Failed to open ALD file: %s", archive_strerror(error));
 
@@ -290,7 +356,13 @@ static void afa_init(enum asset_type type, char *file)
 		WARNING("Multiple asset archives for type %s", asset_strtype(type));
 
 	int error;
+
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	struct afa_archive *ar = afa_open_conv(file, MMAP_IF_64BIT, &error,
+			asset_manager_convert_string);
+#else
 	struct afa_archive *ar = afa_open(file, MMAP_IF_64BIT, &error);
+#endif
 	if (!ar)
 		ERROR("Failed to open AFA file: %s", archive_strerror(error));
 
@@ -308,7 +380,7 @@ static void afa_init(enum asset_type type, char *file)
 
 static char *get_base_name(const char *ain_filename)
 {
-	char *path = sjis2utf(ain_filename, 0);
+	char *path = vm_str_to_utf8(ain_filename, 0);
 	char *dot = strrchr(path, '.');
 	if (dot)
 		*dot = '\0';
@@ -317,6 +389,12 @@ static char *get_base_name(const char *ain_filename)
 
 void asset_manager_init(void)
 {
+	/* On OHOS the game may re-enter main() multiple times (one per chapter
+	 * transition via system.Exit(0)).  ALD/AFA archives are stateless
+	 * read-only views; reuse them across sessions instead of re-opening. */
+	if (assets[ASSET_CG] || assets[ASSET_BGM] || assets[ASSET_SOUND])
+		return;
+
 	char *ald_filenames[ASSET_TYPE_MAX][ALD_FILEMAX] = {0};
 	int ald_count[ASSET_TYPE_MAX] = {0};
 	char *afa_filenames[ASSET_TYPE_MAX] = {0};

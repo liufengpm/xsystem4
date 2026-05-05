@@ -1,5 +1,10 @@
 option('debugger', type : 'feature', value : 'auto')
 option('opengles', type : 'feature', value : 'auto', description : 'Target OpenGL ES 3.0')
+option('audio_backend',
+	type : 'combo',
+	choices : ['sndfile', 'ffmpeg'],
+	value : 'sndfile',
+	description : 'Audio backend to use; ffmpeg matches the Harmony mixer path for cross-platform validation')
 option('windows_static_deps',
 	type : 'boolean',
 	value : false,

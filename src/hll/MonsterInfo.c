@@ -65,7 +65,7 @@ static void return_string(struct string **out, const char *s)
 {
 	if (*out)
 		free_string(*out);
-	*out = s ? cstr_to_string(s) : string_ref(&EMPTY_STRING);
+	*out = s ? xsystem4_cstring_to_string(s, strlen(s)) : string_ref(&EMPTY_STRING);
 }
 
 static struct motion *get_motion(unsigned monster, unsigned motion)

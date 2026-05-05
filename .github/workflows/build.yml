@@ -78,8 +78,7 @@ jobs:
             mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-libwebp
             mingw-w64-x86_64-libpng
-            mingw-w64-x86_64-libsndfile
-            mingw-w64-x86_64-glew
+            mingw-w64-x86_64-angleproject
 
       - name: Cache FFmpeg
         id: cache-ffmpeg
@@ -130,10 +129,10 @@ jobs:
       - name: Build
         run: |
           mkdir debug
-          meson debug -Dbuildtype=debug
+          meson setup debug -Dbuildtype=debug -Dopengles=enabled -Daudio_backend=ffmpeg
           ninja -C debug
           mkdir release
-          meson release -Dbuildtype=release
+          meson setup release -Dbuildtype=release -Dopengles=enabled -Daudio_backend=ffmpeg
           ninja -C release
 
       - name: Test
@@ -151,7 +150,9 @@ jobs:
         run: |
           cp release/src/xsystem4.exe COPYING README.md game_compatibility.md dist/
           cp debug/src/xsystem4.exe dist/xsystem4-debug.exe
-          cp /mingw64/bin/glew32.dll dist/
+          for dll in $(ldd release/src/xsystem4.exe | awk '/\/mingw64\/bin\// {print $3}' | sort -u); do
+            cp "$dll" dist/
+          done
           cp extra/*.lnk dist/
           cp -r fonts dist/
           cp -r shaders dist/

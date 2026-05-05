@@ -125,9 +125,13 @@ static void vmAnime_Draw(int handle, int return_)
 		gfx_init_texture_with_cg(&src, cg);
 		gfx_copy(dst, 0, 0, &old, 0, 0, old.w, old.h);
 		gfx_blend_add_satur(dst, anime->pos.x, anime->pos.y, &src, 0, 0, src.w, src.h);
+		/* Swap before delete: Maleoon glDeleteTextures() immediately frees the
+		 * driver object without reference-counting, so deleting 'src' before
+		 * gfx_swap() causes gpu-work-server to dereference a freed object.
+		 * After eglSwapBuffers returns the GPU has consumed all commands. */
+		gfx_swap();
 		gfx_delete_texture(&src);
 		cg_free(cg);
-		gfx_swap();
 		SDL_Delay(start_time + (i + 1) * anime->interval - SDL_GetTicks64());
 	}
 	if (return_) {

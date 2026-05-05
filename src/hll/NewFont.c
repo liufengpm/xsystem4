@@ -27,6 +27,45 @@ static Point NewFont_cursor = { 0, 0 };
 static struct text_render_metrics NewFont_metrics = {0};
 static struct text_render_metrics NewFont_shadow_metrics = {0};
 
+static void newfont_char_to_text(int c, char text[5])
+{
+#if defined(_WIN32) || defined(XSYSTEM4_HOST_UTF8)
+	unsigned int codepoint = (unsigned int)c;
+
+	if ((codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)
+		codepoint = '?';
+
+	if (codepoint <= 0x7F) {
+		text[0] = (char)codepoint;
+		text[1] = '\0';
+		return;
+	}
+	if (codepoint <= 0x7FF) {
+		text[0] = (char)(0xC0 | (codepoint >> 6));
+		text[1] = (char)(0x80 | (codepoint & 0x3F));
+		text[2] = '\0';
+		return;
+	}
+	if (codepoint <= 0xFFFF) {
+		text[0] = (char)(0xE0 | (codepoint >> 12));
+		text[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+		text[2] = (char)(0x80 | (codepoint & 0x3F));
+		text[3] = '\0';
+		return;
+	}
+
+	text[0] = (char)(0xF0 | (codepoint >> 18));
+	text[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+	text[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+	text[3] = (char)(0x80 | (codepoint & 0x3F));
+	text[4] = '\0';
+#else
+	text[0] = c & 0xff;
+	text[1] = c >> 8;
+	text[2] = '\0';
+#endif
+}
+
 // XXX: not used
 //static void NewFont_AlphaComposite(int dst_sp, int dst_x, int dst_y, int src_sp, int src_x, int src_y, int w, int h)
 
@@ -110,7 +149,8 @@ static int NewFont_DrawChar(int sp_no, int c)
 	if (!sp)
 		return 0;
 
-	char text[3] = { c & 0xff, c >> 8, 0 };
+	char text[5] = {0};
+	newfont_char_to_text(c, text);
 	struct texture *t = sprite_get_texture(sp);
 	NewFont_metrics.x = NewFont_cursor.x;
 	NewFont_metrics.y = NewFont_cursor.y;
@@ -124,7 +164,8 @@ static int NewFont_DrawShadowChar(int sp_no, int c)
 	if (!sp)
 		return 0;
 
-	char text[3] = { c & 0xff, c >> 8, 0 };
+	char text[5] = {0};
+	newfont_char_to_text(c, text);
 	struct texture *t = sprite_get_texture(sp);
 	NewFont_shadow_metrics.x = NewFont_cursor.x;
 	NewFont_shadow_metrics.y = NewFont_cursor.y;

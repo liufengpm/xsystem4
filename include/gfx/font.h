@@ -66,6 +66,7 @@ struct font {
 	struct font_size *(*get_size)(struct font *font, float size);
 	float (*get_actual_size)(struct font *font, float size);
 	float (*get_actual_size_round_down)(struct font *font, float size);
+	bool (*has_glyph)(struct font *font, uint32_t code);
 	bool (*get_glyph)(struct font_size *size, struct glyph *dst, uint32_t code, enum font_weight weight);
 	float (*size_char)(struct font_size *size, uint32_t code);
 	float (*size_char_kerning)(struct font_size *size, uint32_t code, uint32_t code_next);

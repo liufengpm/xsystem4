@@ -41,6 +41,7 @@ void wai_load(const char *path);
 struct wai *wai_get(int no);
 
 void mixer_init(void);
+void mixer_shutdown(void);
 int mixer_get_numof(void);
 const char *mixer_get_name(int n);
 int mixer_set_name(int n, const char *name);
@@ -53,6 +54,10 @@ struct sts_mixer_stream_t;
 int mixer_stream_play(struct sts_mixer_stream_t* stream, int volume);
 bool mixer_stream_set_volume(int voice, int volume);
 void mixer_stream_stop(int voice);
+/* Lock/unlock the SDL audio device. Callers can use these to synchronize
+ * with the audio callback thread (e.g. before freeing audio resources). */
+void mixer_lock_audio(void);
+void mixer_unlock_audio(void);
 
 struct archive_data;
 struct channel;

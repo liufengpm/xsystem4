@@ -41,6 +41,22 @@ bool sact_dirty = true;
 LIST_HEAD(listhead, sact_sprite) sprites_with_plugins =
 	LIST_HEAD_INITIALIZER(sprites_with_plugins);
 
+/* Pre-warmed shader programs compiled before the first frame.  Avoids late
+ * shader compilation that can crash certain GPU compilers (e.g. BiSheng on
+ * HiSilicon Kirin) and also improves first-frame latency on all backends.
+ * sprite_init_sact / sprite_init_chipmunk steal the program from here
+ * instead of recompiling at game-script call time. */
+static struct shader prewarm_sact_shader;     /* sprite.f.glsl */
+static struct shader prewarm_chipmunk_shader; /* parts.f.glsl  */
+
+void sprite_prewarm_shaders(void)
+{
+	gfx_load_shader(&prewarm_sact_shader,
+		"shaders/render.v.glsl", "shaders/sprite.f.glsl");
+	gfx_load_shader(&prewarm_chipmunk_shader,
+		"shaders/parts.v.glsl", "shaders/parts.f.glsl");
+}
+
 // XXX: sprites should typically be set to zero and then initialized with this
 //      function upon allocation.
 void sprite_init(struct sact_sprite *sp)
@@ -120,28 +136,36 @@ static void prepare_chipmunk_shader(struct gfx_render_job *job, void *data)
 void sprite_init_sact(void)
 {
 	if (sprite_shader.s.prepare) {
-		if (sprite_shader.s.prepare != prepare_sact_shader) {
+		if (sprite_shader.s.prepare != prepare_sact_shader)
 			WARNING("mixed SACT2/ChipmunkSpriteEngine initialization");
-			return;
-		}
+		return; /* already initialized (or init in progress) */
 	}
-	gfx_load_shader(&sprite_shader.s, "shaders/render.v.glsl", "shaders/sprite.f.glsl");
+	/* Steal the pre-warmed program to avoid late shader compilation. */
+	if (prewarm_sact_shader.program) {
+		sprite_shader.s = prewarm_sact_shader;
+		prewarm_sact_shader.program = 0;
+	} else {
+		gfx_load_shader(&sprite_shader.s, "shaders/render.v.glsl", "shaders/sprite.f.glsl");
+	}
 	sprite_shader.blend_rate = glGetUniformLocation(sprite_shader.s.program, "blend_rate");
 	sprite_shader.multiply_color = glGetUniformLocation(sprite_shader.s.program, "multiply_color");
 	sprite_shader.s.prepare = prepare_sact_shader;
-
 }
 
 void sprite_init_chipmunk(void)
 {
 	if (sprite_shader.s.prepare) {
-		if (sprite_shader.s.prepare != prepare_chipmunk_shader) {
+		if (sprite_shader.s.prepare != prepare_chipmunk_shader)
 			WARNING("mixed SACT2/ChipmunkSpriteEngine initialization");
-		} else {
-			return;
-		}
+		return; /* already initialized (or init in progress) */
 	}
-	gfx_load_shader(&sprite_shader.s, "shaders/parts.v.glsl", "shaders/parts.f.glsl");
+	/* Steal the pre-warmed program to avoid late shader compilation. */
+	if (prewarm_chipmunk_shader.program) {
+		sprite_shader.s = prewarm_chipmunk_shader;
+		prewarm_chipmunk_shader.program = 0;
+	} else {
+		gfx_load_shader(&sprite_shader.s, "shaders/parts.v.glsl", "shaders/parts.f.glsl");
+	}
 	sprite_shader.blend_rate = glGetUniformLocation(sprite_shader.s.program, "blend_rate");
 	sprite_shader.multiply_color = glGetUniformLocation(sprite_shader.s.program, "multiply_color");
 	sprite_shader.add_color = glGetUniformLocation(sprite_shader.s.program, "add_color");

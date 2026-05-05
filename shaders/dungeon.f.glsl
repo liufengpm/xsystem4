@@ -24,7 +24,7 @@ in float dist;
 in vec2 tex_coord;
 out vec4 frag_color;
 
-const float FOG_MAX_DIST = 12.0;
+// [OHOS] FOG_MAX_DIST inlined to avoid Maleoon 920 S0015 (const float used in expressions).
 const vec3 FOG_COLOR = vec3(0.0, 0.0, 0.0);
 
 void main() {
@@ -34,7 +34,7 @@ void main() {
                 light_factor = texture(light_texture, tex_coord).a;
         }
         if (use_fog) {
-                float fog_factor = (FOG_MAX_DIST - dist) / FOG_MAX_DIST;
+                float fog_factor = (12.0 - dist) / 12.0; // FOG_MAX_DIST=12.0
                 fog_factor = clamp(fog_factor, 0.3, 1.0);
                 frag_color = vec4(mix(FOG_COLOR, texel.rgb * light_factor, fog_factor), texel.a * alpha_mod);
         } else {

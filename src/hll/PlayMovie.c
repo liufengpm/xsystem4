@@ -42,7 +42,13 @@ static int PlayMovie_Play(void)
 	return movie_play(mc);
 }
 
-HLL_WARN_UNIMPLEMENTED(, void, PlayMovie, Stop, void);
+static void PlayMovie_Stop(void)
+{
+	if (mc) {
+		movie_free(mc);
+		mc = NULL;
+	}
+}
 
 // PlayMovie is used like this:
 //

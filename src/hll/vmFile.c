@@ -46,6 +46,14 @@ static struct id_pool pool;
 static void read_page(struct vm_file *vf, struct page *page);
 static void write_page(struct vm_file *vf, struct page *page);
 
+static struct string *buffer_read_game_string(struct buffer *buf)
+{
+	size_t raw_len = strlen(buffer_strdata(buf));
+	struct string *s = xsystem4_cstring_to_string(buffer_strdata(buf), raw_len);
+	buffer_skip(buf, raw_len + 1);
+	return s;
+}
+
 static void read_value(struct vm_file *vf, union vm_value *v, enum ain_data_type type)
 {
 	switch (type) {
@@ -59,7 +67,7 @@ static void read_value(struct vm_file *vf, union vm_value *v, enum ain_data_type
 		break;
 	case AIN_STRING:
 		variable_fini(*v, type, true);
-		v->i = heap_alloc_string(buffer_read_string(&vf->buf));
+		v->i = heap_alloc_string(buffer_read_game_string(&vf->buf));
 		break;
 	case AIN_STRUCT:
 	case AIN_ARRAY_TYPE:

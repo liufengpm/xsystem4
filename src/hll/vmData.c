@@ -15,6 +15,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "system4/archive.h"
 #include "system4/buffer.h"
@@ -24,6 +25,7 @@
 #include "id_pool.h"
 #include "vm/heap.h"
 #include "vm/page.h"
+#include "xsystem4.h"
 
 struct vm_data {
 	struct archive_data *dfile;
@@ -31,6 +33,14 @@ struct vm_data {
 };
 
 static struct id_pool pool;
+
+static struct string *buffer_read_game_string(struct buffer *buf)
+{
+	size_t raw_len = strlen(buffer_strdata(buf));
+	struct string *s = xsystem4_cstring_to_string(buffer_strdata(buf), raw_len);
+	buffer_skip(buf, raw_len + 1);
+	return s;
+}
 
 static void vmData_New(void)
 {
@@ -143,7 +153,7 @@ static int vmData_ReadArrayString(int id, struct page **array_)
 		VM_ERROR("Type error");
 
 	for (int i = 0; i < array->nr_vars; i++) {
-		struct string *s = buffer_read_string(&obj->buf);
+		struct string *s = buffer_read_game_string(&obj->buf);
 		variable_set(array, i, AIN_STRING, vm_int(heap_alloc_string(s)));
 	}
 	return 1;

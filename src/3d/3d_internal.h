@@ -117,6 +117,7 @@ struct shadow_renderer {
 	GLuint program;
 	GLuint fbo;
 	GLuint texture;
+	GLuint color_texture;
 
 	// Uniform variable locations
 	GLint local_transform;
